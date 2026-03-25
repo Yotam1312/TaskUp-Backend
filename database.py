@@ -9,7 +9,7 @@ import os
 # ── Connection ─────────────────────────────────────────────────────────────────
 DB_CONFIG = {
     "host":     os.getenv("DB_HOST", "127.0.0.1"),
-    "port":     os.getenv("DB_PORT", 5432),
+    "port":     int(os.getenv("DB_PORT", 5432)),
     "dbname":   os.getenv("DB_NAME", "taskup_db"),
     "user":     os.getenv("DB_USER", "taskup_user"),
     "password": os.getenv("DB_PASSWORD", "taskup_pass")
