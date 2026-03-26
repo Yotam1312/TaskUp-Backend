@@ -10,15 +10,15 @@ import os
 DB_CONFIG = {
     "host":     os.getenv("DB_HOST", "127.0.0.1"),
     "port":     int(os.getenv("DB_PORT", 5432)),
-    "dbname":   os.getenv("DB_NAME", "taskup_db"),
+    "dbname":   os.getenv("DB_NAME", "postgres"), 
     "user":     os.getenv("DB_USER", "taskup_user"),
     "password": os.getenv("DB_PASSWORD", "taskup_pass")
 }
 
-
 def get_conn():
     """Open a new DB connection."""
-    return psycopg2.connect(**DB_CONFIG)
+    # הוספת sslmode='require' היא חובה עבור Azure PostgreSQL
+    return psycopg2.connect(**DB_CONFIG, sslmode='require')
 
 
 # ── Users ──────────────────────────────────────────────────────────────────────
