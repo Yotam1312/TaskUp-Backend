@@ -85,9 +85,10 @@ def get_all_users() -> list[dict]:
 
 def save_assignments(user_id: int, assignments: list[dict]):
     """
-    For each assignment:
-    - Upsert into assignments (by link)
-    - Upsert into user_assignments (by user_id + assignment_id)
+    עבור כל מטלה:
+    - מעדכן/מכניס לטבלת assignments (לפי הקישור)
+    - מעדכן/מכניס לטבלת user_assignments (לפי user_id + assignment_id)
+    - מחשב ושומר סטטוס הגשה באיחור
     """
     upsert_assign = """
     INSERT INTO assignments (moodle_assign_id, title, course, open_date, due_date, link)
@@ -99,10 +100,14 @@ def save_assignments(user_id: int, assignments: list[dict]):
     """
 
     upsert_user_assign = """
-    INSERT INTO user_assignments (user_id, assignment_id, is_submitted, is_archived)
-    VALUES (%s, %s, %s, FALSE)
+    INSERT INTO user_assignments (user_id, assignment_id, is_submitted, is_archived, is_submitted_late)
+    VALUES (%s, %s, %s, FALSE, %s)
     ON CONFLICT (user_id, assignment_id) DO UPDATE SET
-        is_submitted = user_assignments.is_submitted OR EXCLUDED.is_submitted;;
+        is_submitted_late = CASE 
+            WHEN user_assignments.is_submitted = FALSE AND EXCLUDED.is_submitted = TRUE THEN EXCLUDED.is_submitted_late
+            ELSE user_assignments.is_submitted_late
+        END,
+        is_submitted = user_assignments.is_submitted OR EXCLUDED.is_submitted;
     """
 
     with get_conn() as conn:
@@ -121,10 +126,15 @@ def save_assignments(user_id: int, assignments: list[dict]):
                 ))
                 assign_id = cur.fetchone()[0]
 
+                is_submitted = task.get("is_submitted", False)
+                # המטלה נחשבת כ"הוגשה באיחור" רק אם הוגשה והתאריך הנוכחי עבר את היעד
+                is_late = bool(is_submitted and due_date and due_date < datetime.utcnow())
+
                 cur.execute(upsert_user_assign, (
                     user_id,
                     assign_id,
-                    task.get("is_submitted", False)
+                    is_submitted,
+                    is_late
                 ))
 
         print(f"Saved/updated {len(assignments)} assignments for user {user_id}.")
@@ -162,18 +172,31 @@ def get_assignments_for_user(user_id: int, submitted: bool, archived: bool) -> l
     return [dict(r) for r in rows]
 
 def update_user_assignment(ua_id: int, user_id: int, is_submitted: bool | None = None, is_archived: bool | None = None):
-    if is_submitted is not None:
-        query = "UPDATE user_assignments SET is_submitted = %s WHERE id = %s AND user_id = %s"
-        val = is_submitted
-    elif is_archived is not None:
-        query = "UPDATE user_assignments SET is_archived = %s WHERE id = %s AND user_id = %s"
-        val = is_archived
-    else:
-        return
-
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(query, (val, ua_id, user_id))
+            if is_submitted is True:
+                # בודקים אם כרגע הזמן עבר את תאריך היעד
+                check_query = """
+                    SELECT (a.due_date < (NOW() AT TIME ZONE 'UTC')) as late 
+                    FROM user_assignments ua 
+                    JOIN assignments a ON ua.assignment_id = a.id 
+                    WHERE ua.id = %s
+                """
+                cur.execute(check_query, (ua_id,))
+                result = cur.fetchone()
+                is_late = (result[0] is True) if result else False
+                
+                query = "UPDATE user_assignments SET is_submitted = %s, is_submitted_late = %s WHERE id = %s AND user_id = %s"
+                cur.execute(query, (True, is_late, ua_id, user_id))
+            
+            elif is_submitted is False:
+                # בביטול הגשה מחזירים הכל לאחור
+                query = "UPDATE user_assignments SET is_submitted = %s, is_submitted_late = FALSE WHERE id = %s AND user_id = %s"
+                cur.execute(query, (False, ua_id, user_id))
+                
+            elif is_archived is not None:
+                query = "UPDATE user_assignments SET is_archived = %s WHERE id = %s AND user_id = %s"
+                cur.execute(query, (is_archived, ua_id, user_id))
 
 
 # ── Refresh Tokens ─────────────────────────────────────────────────────────────
@@ -232,19 +255,27 @@ def upsert_notification_settings(user_id: int, hours_before: list, notify_on_new
     """
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(query, (user_id, hours_before, notify_on_new, notify_on_change))          
+            cur.execute(query, (user_id, hours_before, notify_on_new, notify_on_change))    
+            
+            
+
+# בתוך database.py
 def register_device_token(user_id: int, token: str):
     """
-    שומר טוקן של מכשיר. 
-    מעודכן לעבוד עם Primary Key מורכב (user_id, fcm_token).
-    """
-    query = """
-        INSERT INTO user_devices (user_id, fcm_token)
-        VALUES (%s, %s)
-        ON CONFLICT (user_id, fcm_token) DO NOTHING;
+    רושם טוקן למשתמש. אם הטוקן היה שייך למשתמש אחר, 
+    הוא מועבר למשתמש הנוכחי כדי למנוע כפילויות במכשיר.
     """
     with get_conn() as conn:
         with conn.cursor() as cur:
+            # 1. מחיקת הטוקן מכל משתמש אחר (כדי שלא יקבלו התראות של המכשיר הזה)
+            cur.execute("DELETE FROM user_devices WHERE fcm_token = %s AND user_id != %s", (token, user_id))
+            
+            # 2. הכנסת הטוקן למשתמש הנוכחי
+            query = """
+                INSERT INTO user_devices (user_id, fcm_token)
+                VALUES (%s, %s)
+                ON CONFLICT (user_id, fcm_token) DO NOTHING;
+            """
             cur.execute(query, (user_id, token))
             
 def sync_user_courses(user_id, courses_list):
@@ -381,7 +412,9 @@ def get_all_assignments(user_id: int) -> list[dict]:
     query = """
     SELECT
         ua.id, a.title, a.course, a.open_date, a.due_date, a.link,
-        ua.is_submitted, ua.is_archived,
+        ua.is_submitted, ua.is_archived, ua.is_submitted_late,
+        -- בדיקה האם הקורס הסתיים (לפי שעון UTC)
+        (c.end_date IS NOT NULL AND c.end_date < EXTRACT(EPOCH FROM NOW())) as is_course_expired,
         CASE
             WHEN ua.is_archived = TRUE OR (c.end_date IS NOT NULL AND c.end_date < EXTRACT(EPOCH FROM NOW())) THEN 'archive'
             WHEN ua.is_submitted = TRUE THEN 'completed'
@@ -400,7 +433,6 @@ def get_all_assignments(user_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 def get_pending_reminders():
-    """שולף רק את המידע הרלוונטי לחישוב התזכורות במכה אחת"""
     query = """
     SELECT
         ua.id AS ua_id,
@@ -409,15 +441,19 @@ def get_pending_reminders():
         a.title,
         a.course,
         a.due_date,
+        a.moodle_assign_id, -- דרוש לבדיקה מול מודל
         ns.hours_before,
-        d.fcm_token
+        d.fcm_token,
+        u.moodle_token,      -- דרוש לבדיקה מול מודל
+        u.moodle_user_id     -- דרוש לבדיקה מול מודל
     FROM user_assignments ua
     JOIN assignments a ON ua.assignment_id = a.id
     JOIN notification_settings ns ON ua.user_id = ns.user_id
     JOIN user_devices d ON ua.user_id = d.user_id
+    JOIN users u ON ua.user_id = u.id
     WHERE ua.is_submitted = FALSE
       AND ua.is_archived = FALSE
-      AND a.due_date > NOW()
+      AND a.due_date > (NOW() AT TIME ZONE 'UTC')
       AND ns.hours_before IS NOT NULL;
     """
     with get_conn() as conn:

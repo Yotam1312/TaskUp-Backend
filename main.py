@@ -180,30 +180,30 @@ def login_to_moodle(req: LoginRequest):
         moodle_user_id=userid
     )
 
-    # 4. שליפת מטלות ושמירה בDB (אותה לוגיקה כמו /api/tasks)
-    courses = get_user_courses(wstoken, userid)
-    course_map = {c["id"]: c["fullname"] for c in courses}
-    course_ids = list(course_map.keys())
+    # # 4. שליפת מטלות ושמירה בDB (אותה לוגיקה כמו /api/tasks)
+    # courses = get_user_courses(wstoken, userid)
+    # course_map = {c["id"]: c["fullname"] for c in courses}
+    # course_ids = list(course_map.keys())
 
-    assignments_to_save = []
-    if course_ids:
-        assignments_data = get_assignments_for_courses(wstoken, course_ids)
-        for course in assignments_data:
-            course_name = course_map.get(course["id"], "קורס לא ידוע")
-            for assign in course.get("assignments", []):
-                assign_id = assign["id"]
-                status = get_submission_status(wstoken, userid, assign_id)
-                assignments_to_save.append({
-                    "moodle_assign_id": assign_id,
-                    "title": assign["name"],
-                    "course": course_name,
-                    "open_date": assign.get("allowsubmissionsfromdate"),
-                    "due_date": assign.get("duedate"),
-                    "link": f"https://moodle.ruppin.ac.il/mod/assign/view.php?id={assign['cmid']}",
-                    "is_submitted": status == "submitted"
-                })
+    # assignments_to_save = []
+    # if course_ids:
+    #     assignments_data = get_assignments_for_courses(wstoken, course_ids)
+    #     for course in assignments_data:
+    #         course_name = course_map.get(course["id"], "קורס לא ידוע")
+    #         for assign in course.get("assignments", []):
+    #             assign_id = assign["id"]
+    #             status = get_submission_status(wstoken, userid, assign_id)
+    #             assignments_to_save.append({
+    #                 "moodle_assign_id": assign_id,
+    #                 "title": assign["name"],
+    #                 "course": course_name,
+    #                 "open_date": assign.get("allowsubmissionsfromdate"),
+    #                 "due_date": assign.get("duedate"),
+    #                 "link": f"https://moodle.ruppin.ac.il/mod/assign/view.php?id={assign['cmid']}",
+    #                 "is_submitted": status == "submitted"
+    #             })
 
-    save_assignments(user_id, assignments_to_save)
+    # save_assignments(user_id, assignments_to_save)
 
     # 5. הגדרות ברירת מחדל להתראות אם משתמש חדש
     if not get_notification_settings(user_id):
@@ -437,41 +437,36 @@ def reminder_task():
     print(f"--- [בדיקת תזכורות] {datetime.now().strftime('%H:%M:%S')} ---")
     try:
         reminders = get_pending_reminders()
-        now = datetime.utcnow() # משתמשים ב-UTC כמו המודל
+        now = datetime.utcnow()
         
         for row in reminders:
             time_left = row['due_date'] - now
             hours_left = time_left.total_seconds() / 3600.0
             
-            # אם נשאר פחות מ-0 שעות, המטלה עברה, מדלגים
-            if hours_left < 0:
-                continue
+            if hours_left < 0: continue
                 
-            # מוצאים את ההתראות הרלוונטיות שהמשתמש ביקש והזמן שלהן הגיע או עבר
             valid_thresholds = [x for x in row['hours_before'] if hours_left <= x]
-            
-            if not valid_thresholds:
-                continue
+            if not valid_thresholds: continue
                 
-            # לוקחים את ההתראה הקרובה ביותר
             target_threshold = min(valid_thresholds)
             
-            # התנאי הקריטי: שולחים רק אם טרם שלחנו התראה עבור הטווח הזה
             if row['last_notified_hours'] != target_threshold:
-                # חיתוך ל-3 מילים ראשונות
+                # --- בדיקת "ברגע האחרון" מול המודל ---
+                token_plain = decrypt_token(row['moodle_token'])
+                moodle_status = get_submission_status(token_plain, row['moodle_user_id'], row['moodle_assign_id'])
+                
+                if moodle_status == "submitted":
+                    # המשתמש הגיש במודל! נעדכן את ה-DB ולא נשלח פוש
+                    print(f"-> המשתמש הגיש במודל. מעדכן DB עבור מטלה {row['title']} ומבטל התראה.")
+                    update_user_assignment(row['ua_id'], row['user_id'], is_submitted=True)
+                    continue 
+
+                # אם באמת לא הוגש - שולחים את ההתראה המעוצבת
                 words = row['title'].split()
                 short_title = " ".join(words[:3]) + ("..." if len(words) > 3 else "")
-                
-                # בחירת אימוג'י לפי הדחיפות
-                if target_threshold <= 2:
-                    emoji = "🚨"
-                elif target_threshold <= 12:
-                    emoji = "⏰"
-                else:
-                    emoji = "⏳"
+                emoji = "🚨" if target_threshold <= 2 else "⏰" if target_threshold <= 12 else "⏳"
                     
-                message = f"{emoji} המטלה '{short_title}' בקורס '{row['course']}' מסתיימת בעוד פחות מ-{target_threshold} שעות!"
-                print(f"-> שולח התראה: {message}")
+                message = f"{emoji} המטלה '{short_title}' מקורס '{row['course']}' מסתיימת בעוד פחות מ-{target_threshold} שעות!"
                 
                 send_push_notification(row['fcm_token'], "MyTasks - זמן להגשה", message)
                 update_last_notified(row['ua_id'], target_threshold)
