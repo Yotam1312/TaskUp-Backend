@@ -4,6 +4,9 @@ from pydantic import BaseModel
 from typing import Optional
 import requests
 from dotenv import load_dotenv
+from apscheduler.schedulers.background import BackgroundScheduler
+from datetime import datetime
+from exponent_server_sdk import PushClient, PushMessage
 
 from database import (
     save_user_to_db,
@@ -15,12 +18,25 @@ from database import (
     get_refresh_token,
     revoke_refresh_token,
     get_notification_settings,
-    upsert_notification_settings
+    upsert_notification_settings,
+    register_device_token,
+    sync_user_courses,
+    get_tokens_for_course,
+    get_active_course_representatives,
+    save_new_assignment_globally,
+    assignment_exists,
+    get_assignment_by_moodle_id,
+    update_assignment_due_date,
+    link_assignment_to_course_users,
+    get_all_assignments,
+    get_pending_reminders,
+    update_last_notified
 )
 from security import (
     create_access_token,
     decode_access_token,
-    generate_refresh_token
+    generate_refresh_token,
+    decrypt_token
 )
 from models import (
     NotificationSettingsUpdate
@@ -29,6 +45,8 @@ from models import (
 load_dotenv()
 
 app = FastAPI(title="Moodle Ruppin Tasks API")
+
+scheduler = BackgroundScheduler()
 
 app.add_middleware(
     CORSMiddleware,
@@ -52,6 +70,8 @@ class RefreshRequest(BaseModel):
 
 
 # --- Helper: בדיקת טוקן בכל בקשה ---
+
+
 def get_current_user_id(authorization: Optional[str]) -> int:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid token")
@@ -60,6 +80,30 @@ def get_current_user_id(authorization: Optional[str]) -> int:
     if not user_id:
         raise HTTPException(status_code=401, detail="Token expired or invalid")
     return user_id
+
+def send_push_notification(expo_token: str, title: str, body: str):
+    """
+    שולח התראת פוש למכשיר ספציפי דרך ה-API של אקספו.
+    """
+    url = "https://exp.host/--/api/v2/push/send"
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "to": expo_token,
+        "title": title,
+        "body": body,
+        "sound": "default", # גורם לטלפון לצפצף
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=payload)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        print(f"Error sending push notification: {e}")
+        return None
 
 
 # --- Helper Functions for Moodle API (לא שונה כלום) ---
@@ -71,6 +115,7 @@ def get_user_courses(wstoken: str, userid: int):
         "moodlewsrestformat": "json"
     }
     res = requests.get(MOODLE_URL, params=params).json()
+    
     if isinstance(res, dict) and "exception" in res:
         raise HTTPException(status_code=400, detail="Invalid token or user ID")
     return res
@@ -111,6 +156,7 @@ def login_to_moodle(req: LoginRequest):
         "service": "moodle_mobile_app"
     }
     res = requests.get(LOGIN_URL, params=params).json()
+    print(f"DEBUG Moodle Response: success ")
 
     if "error" in res:
         raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -161,7 +207,7 @@ def login_to_moodle(req: LoginRequest):
 
     # 5. הגדרות ברירת מחדל להתראות אם משתמש חדש
     if not get_notification_settings(user_id):
-        upsert_notification_settings(user_id, 24, True, True)
+        upsert_notification_settings(user_id, [24], True, True)
 
     # 6. יצירת טוקנים שלנו
     access_token = create_access_token(user_id)
@@ -174,6 +220,19 @@ def login_to_moodle(req: LoginRequest):
         "access_token": access_token,
         "refresh_token": refresh_token
     }
+    
+@app.get("/api/test-notification")
+def trigger_test_notification():
+    # שים כאן את הטוקן שלך ישירות כדי לוודא שזה עובד
+    my_token = "ExponentPushToken[O_PZroF2XB8khcoM0SW81J]"
+    
+    result = send_push_notification(
+        expo_token=my_token,
+        title="MyTasks",
+        body="יא באללה וכמה לה לה וכל היום זה רק ללה"
+    )
+    
+    return {"message": "Notification triggered", "expo_result": result}
 
 
 @app.post("/api/refresh")
@@ -228,6 +287,23 @@ def mark_archived(assignment_id: int, authorization: Optional[str] = Header(None
     update_user_assignment(assignment_id, user_id, is_archived=True)
     return {"success": True}
 
+@app.patch("/api/assignments/{assignment_id}/unarchive")
+def unmark_archived(assignment_id: int, authorization: Optional[str] = Header(None)):
+    user_id = get_current_user_id(authorization)
+    update_user_assignment(assignment_id, user_id, is_archived=False)
+    return {"success": True}
+
+@app.patch("/api/assignments/{assignment_id}/unsubmit")
+def unmark_submitted(assignment_id: int, authorization: Optional[str] = Header(None)):
+    user_id = get_current_user_id(authorization)
+    update_user_assignment(assignment_id, user_id, is_submitted=False)
+    return {"success": True}
+
+
+@app.get("/api/assignments/all")
+def get_all(authorization: Optional[str] = Header(None)):
+    user_id = get_current_user_id(authorization)
+    return get_all_assignments(user_id)
 
 # ── Sync ──────────────────────────────────────────────────────────────────────
 
@@ -249,6 +325,7 @@ def sync_assignments(authorization: Optional[str] = Header(None)):
 
     # שליפת מטלות מMoodle עם הwstoken מהDB
     courses = get_user_courses(wstoken, moodle_userid)
+    sync_user_courses(user_id, courses)
     course_map = {c["id"]: c["fullname"] for c in courses}
     course_ids = list(course_map.keys())
 
@@ -285,8 +362,168 @@ def get_settings(authorization: Optional[str] = Header(None)):
     return settings
 
 
-@app.patch("/api/notifications/settings")
+# בתוך main.py
+@app.post("/api/notifications/settings") # עדיף POST כי זה UPSERT, או להישאר עם PATCH אבל לוודא שבפרונט זה תואם
 def update_settings(body: NotificationSettingsUpdate, authorization: Optional[str] = Header(None)):
     user_id = get_current_user_id(authorization)
-    upsert_notification_settings(user_id, body.hours_before, body.notify_on_new_assignment, body.notify_on_due_date_change)
+    
+    # קריאה לפונקציה המעודכנת ב-database.py
+    upsert_notification_settings(
+        user_id, 
+        body.hours_before, 
+        body.notify_on_new, 
+        body.notify_on_change
+    )
     return {"success": True}
+
+class DeviceTokenRequest(BaseModel):
+    token: str
+
+@app.post("/api/notifications/register-device")
+def register_device(req: DeviceTokenRequest, authorization: Optional[str] = Header(None)):
+    user_id = get_current_user_id(authorization)
+    register_device_token(user_id, req.token)
+    return {"success": True, "message": "Device registered successfully"}
+
+
+# --- הגדרת המשימה  ---
+def discovery_task():
+    print(f"--- [סריקה ] {datetime.now().strftime('%H:%M:%S')} ---")
+    
+    try:
+        reps = get_active_course_representatives()
+        for rep in reps:
+            token_plain = decrypt_token(rep['moodle_token'])
+            moodle_data = get_assignments_for_courses(token_plain, [rep['course_id']])
+                        
+            for course in moodle_data:
+                for assign in course.get("assignments", []):
+                    moodle_id = assign["id"]
+                    new_due_date_ts = assign.get("duedate")
+                    new_due_date_dt = datetime.utcfromtimestamp(new_due_date_ts) if new_due_date_ts else None
+                    
+                    # נניח שאתה מוסיף פונקציה שמחזירה את המטלה מה-DB (או None אם לא קיימת)
+                    existing_assign = get_assignment_by_moodle_id(moodle_id) 
+                    
+                    # 1. גילוי מטלה חדשה לגמרי
+                    if not existing_assign:
+                        print(f"! גילוי חדש: {assign['name']} בקורס {rep['course_name']}")
+                        assign_db_id = save_new_assignment_globally(
+                            rep['course_id'], 
+                            rep['course_name'], # <--- זה מה שהיה חסר!
+                            assign
+    )
+                        
+                        link_assignment_to_course_users(assign_db_id, rep['course_id'])
+                        
+                        tokens = get_tokens_for_course(rep['course_id'])
+                        if tokens:
+                            send_push_notifications(tokens, f"מטלה חדשה: {assign['name']}")
+                            
+                        
+                    # 2. גילוי שינוי תאריך במטלה קיימת
+                    elif existing_assign.get("due_date") != new_due_date_dt:
+                        print(f"!!! שינוי תאריך: {assign['name']} בקורס {rep['course_name']}")
+                        update_assignment_due_date(moodle_id, new_due_date_ts) # פונקציה לעדכון תאריך בלבד
+                        
+                        tokens = get_tokens_for_course(rep['course_id'])
+                        if tokens:
+                            send_push_notifications(tokens, f"עודכן תאריך הגשה: {assign['name']}")
+
+    except Exception as e:
+        print(f"שגיאה קריטית בסריקה: {e}")
+
+def reminder_task():
+    print(f"--- [בדיקת תזכורות] {datetime.now().strftime('%H:%M:%S')} ---")
+    try:
+        reminders = get_pending_reminders()
+        now = datetime.utcnow() # משתמשים ב-UTC כמו המודל
+        
+        for row in reminders:
+            time_left = row['due_date'] - now
+            hours_left = time_left.total_seconds() / 3600.0
+            
+            # אם נשאר פחות מ-0 שעות, המטלה עברה, מדלגים
+            if hours_left < 0:
+                continue
+                
+            # מוצאים את ההתראות הרלוונטיות שהמשתמש ביקש והזמן שלהן הגיע או עבר
+            valid_thresholds = [x for x in row['hours_before'] if hours_left <= x]
+            
+            if not valid_thresholds:
+                continue
+                
+            # לוקחים את ההתראה הקרובה ביותר
+            target_threshold = min(valid_thresholds)
+            
+            # התנאי הקריטי: שולחים רק אם טרם שלחנו התראה עבור הטווח הזה
+            if row['last_notified_hours'] != target_threshold:
+                # חיתוך ל-3 מילים ראשונות
+                words = row['title'].split()
+                short_title = " ".join(words[:3]) + ("..." if len(words) > 3 else "")
+                
+                # בחירת אימוג'י לפי הדחיפות
+                if target_threshold <= 2:
+                    emoji = "🚨"
+                elif target_threshold <= 12:
+                    emoji = "⏰"
+                else:
+                    emoji = "⏳"
+                    
+                message = f"{emoji} המטלה '{short_title}' בקורס '{row['course']}' מסתיימת בעוד פחות מ-{target_threshold} שעות!"
+                print(f"-> שולח התראה: {message}")
+                
+                send_push_notification(row['fcm_token'], "MyTasks - זמן להגשה", message)
+                update_last_notified(row['ua_id'], target_threshold)
+                
+    except Exception as e:
+        print(f"שגיאה בסריקת תזכורות: {e}")
+# --- הפעלה ב-Startup ---
+
+def should_run_discovery():
+    now = datetime.now()
+    h, m, wd = now.hour, now.minute, now.weekday()
+    is_weekend = wd in [4, 5] # 4=שישי, 5=שבת (בישראל)
+    
+    # ימי חול (א-ה)
+    if not is_weekend:
+        if 8 <= h < 20: return True
+        if (20 <= h <= 23 or h == 0) and m < 30: return True # בשעות האלו ירוץ רק באזור XX:00
+        return False
+        
+    # סוף שבוע (ו-ש)
+    else:
+        if 8 <= h < 20: return True
+        return False
+
+def run_discovery_if_needed():
+    if should_run_discovery():
+        discovery_task()
+    else:
+        print(f"--- [סריקת מודל] {datetime.now().strftime('%H:%M:%S')} מחוץ לשעות הפעילות, מדלג ---")
+        
+        
+@app.on_event("startup")
+def start_scheduler():
+    # 1. משימת סריקת המודל (רצה כל 30 דקות, אבל בודקת את חוקי השעות שלך)
+    scheduler.add_job(id='moodle_discovery', func=run_discovery_if_needed, trigger='interval', minutes=30)
+    
+    # 2. משימת התזכורות (רצה כל 10 דקות 24/7 כדי לדייק בזמני ההתראה)
+    scheduler.add_job(id='reminders_check', func=reminder_task, trigger='interval', minutes=10)
+    
+    scheduler.start()
+    print("ה-Scheduler הופעל בהצלחה עם 2 המשימות!")
+    
+# --- שאר ה-Endpoints שלך (Login, Sync וכו') ---
+@app.get("/")
+def home():
+    return {"status": "running"}
+
+def send_push_notifications(tokens, message_body):
+    """שולחת התראות לכל הטוקנים שברשימה דרך Expo"""
+    client = PushClient()
+    messages = [PushMessage(to=token, body=message_body, sound="default") for token in tokens]
+    try:
+        client.publish_multiple(messages)
+    except Exception as e:
+        print(f"שגיאה בשליחת פושים: {e}")

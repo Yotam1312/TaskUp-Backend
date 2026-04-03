@@ -52,7 +52,28 @@ CREATE TABLE refresh_tokens (
 CREATE TABLE notification_settings (
     id                          SERIAL      PRIMARY KEY,
     user_id                     INTEGER     NOT NULL REFERENCES users(id) UNIQUE,
-    hours_before                INTEGER     DEFAULT 24,
-    notify_on_new_assignment    BOOLEAN     DEFAULT TRUE,
-    notify_on_due_date_change   BOOLEAN     DEFAULT TRUE
+    hours_before                INTEGER[]   DEFAULT 24,
+    notify_on_new               BOOLEAN     DEFAULT TRUE,
+    notify_on_change            BOOLEAN     DEFAULT TRUE
+);
+
+CREATE TABLE user_devices (
+    user_id     INTEGER         NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    fcm_token   VARCHAR(500)    NOT NULL,
+    PRIMARY KEY (user_id, fcm_token)
+);
+
+ALTER TABLE user_assignments ADD COLUMN last_notified_hours INTEGER DEFAULT NULL;
+
+CREATE TABLE courses (
+    id               INTEGER PRIMARY KEY, 
+    fullname         VARCHAR(300) NOT NULL,
+    start_date       INTEGER NOT NULL,    
+    end_date         INTEGER NOT NULL     
+);
+
+CREATE TABLE user_courses (
+    user_id          INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    course_id        INTEGER REFERENCES courses(id) ON DELETE CASCADE,
+    PRIMARY KEY (user_id, course_id)
 );
