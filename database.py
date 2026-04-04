@@ -146,7 +146,7 @@ def get_assignments_for_user(user_id: int, submitted: bool, archived: bool) -> l
     query = f"""
     SELECT
         ua.id, a.title, a.course, a.open_date, a.due_date, a.link,
-        ua.is_submitted, ua.is_archived
+        ua.is_submitted, ua.is_archived, ua.note
     FROM user_assignments ua
     JOIN assignments a ON ua.assignment_id = a.id
     LEFT JOIN courses c ON a.course = c.fullname
@@ -412,7 +412,7 @@ def get_all_assignments(user_id: int) -> list[dict]:
     query = """
     SELECT
         ua.id, a.title, a.course, a.open_date, a.due_date, a.link,
-        ua.is_submitted, ua.is_archived, ua.is_submitted_late,
+        ua.is_submitted, ua.is_archived, ua.is_submitted_late, ua.note,
         -- בדיקה האם הקורס הסתיים (לפי שעון UTC)
         (c.end_date IS NOT NULL AND c.end_date < EXTRACT(EPOCH FROM NOW())) as is_course_expired,
         CASE
@@ -467,3 +467,16 @@ def update_last_notified(ua_id: int, hours: int):
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(query, (hours, ua_id))
+
+def update_assignment_note(ua_id: int, user_id: int, note: str | None) -> bool:
+    query = """
+    UPDATE user_assignments
+    SET note = %s
+    WHERE id = %s AND user_id = %s
+    RETURNING id;
+    """
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (note, ua_id, user_id))
+            row = cur.fetchone()
+    return row is not None
