@@ -19,7 +19,7 @@ DB_CONFIG = {
 def get_conn():
     """Open a new DB connection."""
     # הוספת sslmode='require' היא חובה עבור Azure PostgreSQL 
-    return psycopg2.connect(**DB_CONFIG, sslmode='disable')
+    return psycopg2.connect(**DB_CONFIG, sslmode='require')
 
 
 # ── Users ──────────────────────────────────────────────────────────────────────

@@ -54,8 +54,8 @@ CREATE TABLE notification_settings (
     id                          SERIAL      PRIMARY KEY,
     user_id                     INTEGER     NOT NULL REFERENCES users(id) UNIQUE,
     hours_before                INTEGER[]   DEFAULT '{24}',
-    notify_on_new               BOOLEAN     DEFAULT TRUE,
-     notify_on_due_date_change            BOOLEAN     DEFAULT TRUE
+    notify_on_new_assignment    BOOLEAN     DEFAULT TRUE,
+    notify_on_due_date_change   BOOLEAN     DEFAULT TRUE
 );
 
 CREATE TABLE user_devices (
