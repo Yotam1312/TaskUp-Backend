@@ -448,12 +448,13 @@ def get_pending_reminders():
         a.title,
         a.course,
         a.due_date,
-        a.moodle_assign_id, -- דרוש לבדיקה מול מודל
+        a.moodle_assign_id,
         a.item_type,
         ns.hours_before,
         d.fcm_token,
-        u.moodle_token,      -- דרוש לבדיקה מול מודל
-        u.moodle_user_id     -- דרוש לבדיקה מול מודל
+        u.moodle_token,
+        u.moodle_user_id,
+        u.language           -- <--- התוספת כאן
     FROM user_assignments ua
     JOIN assignments a ON ua.assignment_id = a.id
     JOIN notification_settings ns ON ua.user_id = ns.user_id
@@ -488,3 +489,10 @@ def update_assignment_note(ua_id: int, user_id: int, note: str | None) -> bool:
             cur.execute(query, (note, ua_id, user_id))
             row = cur.fetchone()
     return row is not None
+
+def remove_device_token(token: str):
+    """מוחק טוקן מת מהמסד כדי לשמור על טבלה נקייה"""
+    query = "DELETE FROM user_devices WHERE fcm_token = %s;"
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (token,))

@@ -87,6 +87,7 @@ def get_current_user_id(authorization: Optional[str]) -> int:
 def send_push_notification(expo_token: str, title: str, body: str):
     """
     שולח התראת פוש למכשיר ספציפי דרך ה-API של אקספו.
+    אם אקספו מודיע שהטוקן כבר לא קיים במכשיר, מוחק אותו מה-DB.
     """
     url = "https://exp.host/--/api/v2/push/send"
     headers = {
@@ -97,17 +98,27 @@ def send_push_notification(expo_token: str, title: str, body: str):
         "to": expo_token,
         "title": title,
         "body": body,
-        "sound": "default", # גורם לטלפון לצפצף
+        "sound": "default",
     }
     
     try:
         response = requests.post(url, headers=headers, json=payload)
         response.raise_for_status()
-        return response.json()
+        res_json = response.json()
+        
+        # אקספו מחזיר 200 OK גם אם יש שגיאה פנימית עם הטוקן. נבדוק את התוכן:
+        data = res_json.get("data", {})
+        if isinstance(data, dict) and data.get("status") == "error":
+            error_details = data.get("details", {})
+            if error_details.get("error") == "DeviceNotRegistered":
+                print(f"!!! טוקן לא פעיל זוהה ונמחק: {expo_token}")
+                from database import remove_device_token
+                remove_device_token(expo_token)
+                
+        return res_json
     except Exception as e:
-        print(f"Error sending push notification: {e}")
+        print(f"Error sending push notification to {expo_token}: {e}")
         return None
-
 
 # --- Helper Functions for Moodle API (לא שונה כלום) ---
 def get_user_courses(wstoken: str, userid: int):
@@ -260,7 +271,7 @@ def trigger_test_notification():
     
     result = send_push_notification(
         expo_token=my_token,
-        title="MyTasks",
+        title="MyTask",
         body="יא באללה וכמה לה לה וכל היום זה רק ללה"
     )
     
@@ -365,13 +376,7 @@ def get_all(authorization: Optional[str] = Header(None)):
 
 @app.post("/api/assignments/sync")
 def sync_assignments(authorization: Optional[str] = Header(None)):
-    """
-    מושך wstoken מהDB ומרענן את המטלות מMoodle.
-    נקרא כשהמשתמש פותח את האפליקציה מחדש.
-    """
     user_id = get_current_user_id(authorization)
-
-    # שליפת wstoken מהDB
     user = get_user_by_id(user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -379,44 +384,38 @@ def sync_assignments(authorization: Optional[str] = Header(None)):
     wstoken = user["moodle_token"]
     moodle_userid = user["moodle_user_id"]
 
-    # שליפת מטלות מMoodle עם הwstoken מהDB
     courses = get_user_courses(wstoken, moodle_userid)
     sync_user_courses(user_id, courses)
-    course_map = {c["id"]: c["fullname"] for c in courses}
-    course_ids = list(course_map.keys())
-
+    
     assignments_to_save = []
-    if course_ids:
-        assignments_data = get_assignments_for_courses(wstoken, course_ids)
-        for course in assignments_data:
-            course_name = course_map.get(course["id"], "קורס לא ידוע")
-            for assign in course.get("assignments", []):
-                assign_id = assign["id"]
-                status = get_submission_status(wstoken, moodle_userid, assign_id)
+    
+    if courses:
+        for course in courses:
+            # הנה ה-Crowdsourcing! התלמיד עושה סריקה ומודיע לכולם!
+            all_items = run_discovery_engine(course["id"], course["fullname"], wstoken)
+            
+            # עכשיו משתמשים ברשימה המאוחדת שהמנוע החזיר כדי לעדכן אישית את התלמיד
+            # (בלי לפנות למודל שוב!)
+            for item in all_items:
+                if item["type"] == "quiz":
+                    status = get_quiz_submission_status(wstoken, moodle_userid, item["id"])
+                    link = f"https://moodle.ruppin.ac.il/mod/quiz/view.php?id={item['raw_data']['coursemodule']}"
+                    open_date = item['raw_data'].get('timeopen')
+                else:
+                    status = get_submission_status(wstoken, moodle_userid, item["id"])
+                    link = f"https://moodle.ruppin.ac.il/mod/assign/view.php?id={item['raw_data']['cmid']}"
+                    open_date = item['raw_data'].get('allowsubmissionsfromdate')
+                
                 assignments_to_save.append({
-                    "moodle_assign_id": assign_id,
-                    "title": assign["name"],
-                    "course": course_name,
-                    "open_date": assign.get("allowsubmissionsfromdate"),
-                    "due_date": assign.get("duedate"),
-                    "link": f"https://moodle.ruppin.ac.il/mod/assign/view.php?id={assign['cmid']}",
+                    "moodle_assign_id": item["id"],
+                    "item_type": item["type"],
+                    "title": item["name"],
+                    "course": course["fullname"],
+                    "open_date": open_date,
+                    "due_date": item["due_date_ts"],
+                    "link": link,
                     "is_submitted": status == "submitted"
                 })
-        # --- סנכרון בחנים (Quizzes) ---
-        quizzes_data = get_quizzes_for_courses(wstoken, course_ids)
-        for quiz in quizzes_data:
-            course_name = course_map.get(quiz["course"], "קורס לא ידוע")
-            status = get_quiz_submission_status(wstoken, moodle_userid, quiz["id"])
-            assignments_to_save.append({
-                "moodle_assign_id": quiz["id"],
-                "item_type": "quiz",
-                "title": quiz["name"],
-                "course": course_name,
-                "open_date": quiz.get("timeopen"),
-                "due_date": quiz.get("timeclose"),
-                "link": f"https://moodle.ruppin.ac.il/mod/quiz/view.php?id={quiz['coursemodule']}",
-                "is_submitted": status == "submitted"
-            })
 
     save_assignments(user_id, assignments_to_save)
     return {"success": True, "synced": len(assignments_to_save)}
@@ -461,76 +460,14 @@ def register_device(req: DeviceTokenRequest, authorization: Optional[str] = Head
 # --- הגדרת המשימה  ---
 def discovery_task():
     print(f"--- [סריקה ] {datetime.now().strftime('%H:%M:%S')} ---")
-    
     try:
         reps = get_active_course_representatives()
         for rep in reps:
             token_plain = decrypt_token(rep['moodle_token'])
-            
-            # --- שליפה של שני הסוגים ---
-            moodle_assignments = get_assignments_for_courses(token_plain, [rep['course_id']])
-            moodle_quizzes = get_quizzes_for_courses(token_plain, [rep['course_id']])
-            
-            # --- איחוד לרשימה אחת גנרית ---
-            all_items = []
-            for course in moodle_assignments:
-                for item in course.get("assignments", []):
-                    all_items.append({
-                        "id": item["id"], "name": item["name"], 
-                        "due_date_ts": item.get("duedate"), 
-                        "raw_data": item, "type": "assign"
-                    })
-            for quiz in moodle_quizzes:
-                all_items.append({
-                    "id": quiz["id"], "name": quiz["name"], 
-                    "due_date_ts": quiz.get("timeclose"), 
-                    "raw_data": quiz, "type": "quiz"
-                })
-
-            # --- ריצה על הרשימה המאוחדת ---
-            for item in all_items:
-                moodle_id = item["id"]
-                new_due_date_ts = item["due_date_ts"]
-                new_due_date_dt = datetime.utcfromtimestamp(new_due_date_ts) if new_due_date_ts else None
-                item_type = item["type"]
-                
-                existing_item = get_assignment_by_moodle_id(moodle_id, item_type)
-                
-                # יצירת שם קצר להודעה (גבול של 3 מילים)
-                words = item["name"].split()
-                short_title = " ".join(words[:3]) + ("..." if len(words) > 3 else "")
-                
-                # --- גילוי משימה חדשה ---
-                if not existing_item:
-                    print(f"! גילוי חדש: {item['name']} בקורס {rep['course_name']}")
-                    db_id = save_new_assignment_globally(rep['course_id'], rep['course_name'], item["raw_data"], item_type)
-                    link_assignment_to_course_users(db_id, rep['course_id'])
-                    
-                    tokens_data = get_tokens_for_course(rep['course_id'])
-                    for user_device in tokens_data:
-                        lang = user_device.get('language', 'he')
-                        if lang == 'en':
-                            msg = f"🆕 New task! '{short_title}' in '{rep['course_name']}'"
-                        else:
-                            msg = f"🆕 מטלה חדשה! '{short_title}' בקורס '{rep['course_name']}'"
-                        send_push_notification(user_device['fcm_token'], "MyTasks", msg)
-                        
-                # --- שינוי תאריך ---
-                elif existing_item.get("due_date") != new_due_date_dt:
-                    print(f"!!! שינוי תאריך: {item['name']} בקורס {rep['course_name']}")
-                    update_assignment_due_date(moodle_id, new_due_date_ts, item_type)
-                    
-                    tokens_data = get_tokens_for_course(rep['course_id'])
-                    for user_device in tokens_data:
-                        lang = user_device.get('language', 'he')
-                        if lang == 'en':
-                            msg = f"📅 Due date updated: '{short_title}' in '{rep['course_name']}'"
-                        else:
-                            msg = f"📅 עודכן תאריך הגשה: '{short_title}' בקורס '{rep['course_name']}'"
-                        send_push_notification(user_device['fcm_token'], "MyTasks", msg)
-
+            run_discovery_engine(rep['course_id'], rep['course_name'], token_plain)
     except Exception as e:
         print(f"שגיאה קריטית בסריקה: {e}")
+
 
 def reminder_task():
     print(f"--- [בדיקת תזכורות] {datetime.now().strftime('%H:%M:%S')} ---")
@@ -548,40 +485,47 @@ def reminder_task():
             if not valid_thresholds: continue
                 
             target_threshold = min(valid_thresholds)
+            lang = row.get('language', 'he')
             
             if row['last_notified_hours'] != target_threshold:
-                # --- בדיקת "ברגע האחרון" מול המודל ---
                 token_plain = decrypt_token(row['moodle_token'])
                 
+                # --- בדיקת סטטוס הגשה ברגע האחרון ---
                 if row['item_type'] == 'quiz':
                     moodle_status = get_quiz_submission_status(token_plain, row['moodle_user_id'], row['moodle_assign_id'])
-                    item_label = "הבוחן"
+                    item_label = "הבוחן" if lang == 'he' else "The quiz"
                 else:
                     moodle_status = get_submission_status(token_plain, row['moodle_user_id'], row['moodle_assign_id'])
-                    item_label = "המטלה"
+                    item_label = "המטלה" if lang == 'he' else "The task"
                 
                 if moodle_status == "submitted":
-                    print(f"-> המשתמש הגיש במודל. מעדכן DB עבור {item_label} {row['title']} ומבטל התראה.")
+                    print(f"-> המשתמש הגיש במודל. מעדכן DB עבור {row['title']} ומבטל התראה.")
                     update_user_assignment(row['ua_id'], row['user_id'], is_submitted=True)
                     continue
 
-                # אם באמת לא הוגש - שולחים את ההתראה המעוצבת
+                # --- בניית ההודעה ---
                 words = row['title'].split()
                 short_title = " ".join(words[:3]) + ("..." if len(words) > 3 else "")
                 emoji = "🚨" if target_threshold <= 2 else "⏰" if target_threshold <= 12 else "⏳"
-                if target_threshold < 25 :
-                    message = f"{emoji} המטלה '{short_title}' מקורס '{row['course']}' מסתיימת בעוד פחות מ-{target_threshold} שעות!"
-
-                else :
-                        target_threshold_to_days = int(target_threshold/24)
-                        message = f"{emoji} המטלה '{short_title}' מקורס '{row['course']}' מסתיימת בעוד פחות מ-{target_threshold_to_days} ימים!"
                 
-                send_push_notification(row['fcm_token'], "MyTasks - זמן להגשה", message)
+                if lang == 'en':
+                    if target_threshold < 25:
+                        message = f"{emoji} {item_label} '{short_title}' from '{row['course']}' ends in less than {target_threshold} hours!"
+                    else:
+                        days = int(target_threshold / 24)
+                        message = f"{emoji} {item_label} '{short_title}' from '{row['course']}' ends in less than {days} days!"
+                else:
+                    if target_threshold < 25:
+                        message = f"{emoji} {item_label} '{short_title}' מקורס '{row['course']}' מסתיימת בעוד פחות מ-{target_threshold} שעות!"
+                    else:
+                        days = int(target_threshold / 24)
+                        message = f"{emoji} {item_label} '{short_title}' מקורס '{row['course']}' מסתיימת בעוד פחות מ-{days} ימים!"
+                
+                send_push_notification(row['fcm_token'], "MyTask ", message)
                 update_last_notified(row['ua_id'], target_threshold)
                 
     except Exception as e:
         print(f"שגיאה בסריקת תזכורות: {e}")
-# --- הפעלה ב-Startup ---
 
 def should_run_discovery():
     now = datetime.now()
@@ -628,7 +572,7 @@ def send_push_notifications(tokens, message_body):
         try:
             send_push_notification(
                 expo_token=token,
-                title="MyTasks",
+                title="MyTask",
                 body=message_body
             )
         except Exception as e:
@@ -642,3 +586,58 @@ def manual_discovery():
     print("🚀 מפעיל סריקה ידנית של המודל...")
     discovery_task()
     return {"status": "Discovery task triggered successfully", "time": datetime.now().strftime('%H:%M:%S')}
+
+
+def notify_course_users(course_id: int, course_name: str, short_title: str, is_new: bool):
+    """מושכת טוקנים ושולחת התראות חכמות לפי השפה הספציפית של כל משתמש"""
+    tokens_data = get_tokens_for_course(course_id)
+    for user_device in tokens_data:
+        lang = user_device.get('language', 'he')
+        if is_new:
+            msg = f"🆕 New task! '{short_title}' in '{course_name}'" if lang == 'en' else f"🆕 מטלה חדשה! '{short_title}' בקורס '{course_name}'"
+        else:
+            msg = f"📅 Due date updated: '{short_title}' in '{course_name}'" if lang == 'en' else f"📅 עודכן תאריך הגשה: '{short_title}' בקורס '{course_name}'"
+        
+        send_push_notification(user_device['fcm_token'], "MyTasks", msg)
+
+
+def run_discovery_engine(course_id: int, course_name: str, token_plain: str):
+    """
+    מנוע הסריקה המרכזי (Crowdsourced).
+    מוריד ממודל -> מאחד -> מחפש דברים חדשים -> מעדכן DB גלובלי -> שולח פושים.
+    מחזיר את הרשימה המאוחדת כדי שהסנכרון לא יצטרך לפנות למודל שוב.
+    """
+    moodle_assignments = get_assignments_for_courses(token_plain, [course_id])
+    moodle_quizzes = get_quizzes_for_courses(token_plain, [course_id])
+    
+    all_items = []
+    for course in moodle_assignments:
+        for item in course.get("assignments", []):
+            all_items.append({"id": item["id"], "name": item["name"], "due_date_ts": item.get("duedate"), "raw_data": item, "type": "assign"})
+    for quiz in moodle_quizzes:
+        all_items.append({"id": quiz["id"], "name": quiz["name"], "due_date_ts": quiz.get("timeclose"), "raw_data": quiz, "type": "quiz"})
+
+    for item in all_items:
+        moodle_id = item["id"]
+        new_due_date_ts = item["due_date_ts"]
+        new_due_date_dt = datetime.utcfromtimestamp(new_due_date_ts) if new_due_date_ts else None
+        item_type = item["type"]
+        
+        existing_item = get_assignment_by_moodle_id(moodle_id, item_type)
+        
+        # קיצור שם המטלה לעד 3 מילים
+        words = item["name"].split()
+        short_title = " ".join(words[:3]) + ("..." if len(words) > 3 else "")
+        
+        if not existing_item:
+            print(f"! גילוי מנוע חכם: {item['name']} בקורס {course_name}")
+            db_id = save_new_assignment_globally(course_id, course_name, item["raw_data"], item_type=item_type)
+            link_assignment_to_course_users(db_id, course_id)
+            notify_course_users(course_id, course_name, short_title, is_new=True)
+            
+        elif existing_item.get("due_date") != new_due_date_dt:
+            print(f"!!! שינוי תאריך חכם: {item['name']} בקורס {course_name}")
+            update_assignment_due_date(moodle_id, new_due_date_ts, item_type=item_type)
+            notify_course_users(course_id, course_name, short_title, is_new=False)
+            
+    return all_items # מחזיר לטובת ה-Sync האישי
