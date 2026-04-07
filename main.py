@@ -491,8 +491,12 @@ def reminder_task():
                 words = row['title'].split()
                 short_title = " ".join(words[:3]) + ("..." if len(words) > 3 else "")
                 emoji = "🚨" if target_threshold <= 2 else "⏰" if target_threshold <= 12 else "⏳"
-                    
-                message = f"{emoji} המטלה '{short_title}' מקורס '{row['course']}' מסתיימת בעוד פחות מ-{target_threshold} שעות!"
+                if target_threshold < 25 :
+                    message = f"{emoji} המטלה '{short_title}' מקורס '{row['course']}' מסתיימת בעוד פחות מ-{target_threshold} שעות!"
+
+                else :
+                         target_threshold_to_days = int(target_threshold/24)
+                         message = f"{emoji} המטלה '{short_title}' מקורס '{row['course']}' מסתיימת בעוד פחות מ-{target_threshold_to_days} ימים!"
                 
                 send_push_notification(row['fcm_token'], "MyTasks - זמן להגשה", message)
                 update_last_notified(row['ua_id'], target_threshold)
