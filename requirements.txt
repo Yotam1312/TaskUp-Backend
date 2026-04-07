@@ -6,3 +6,5 @@ psycopg2-binary
 python-jose[cryptography]
 cryptography
 pydantic
+apscheduler
+exponent-server-sdk
