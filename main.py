@@ -614,7 +614,7 @@ def start_scheduler():
 @app.get("/")
 def home():
     return {"status": "running"}
-
+#פונקציה 
 def send_push_notifications(tokens, message_body):
     """שולחת התראות לכל הטוקנים שברשימה באמצעות הפונקציה הבסיסית שעובדת"""
     for token in tokens:
