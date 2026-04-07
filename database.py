@@ -279,6 +279,12 @@ def register_device_token(user_id: int, token: str):
             """
             cur.execute(query, (user_id, token))
             
+def update_user_language(user_id: int, language: str):
+    query = "UPDATE users SET language = %s WHERE id = %s;"
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (language, user_id))
+            
 def sync_user_courses(user_id, courses_list):
     """
     מבנכרן את רשימת הקורסים: 
@@ -330,18 +336,19 @@ def get_active_course_representatives():
 
 def get_tokens_for_course(course_id):
     query = """
-    SELECT d.fcm_token
+    SELECT d.fcm_token, u.language
     FROM user_devices d
     JOIN user_courses uc ON d.user_id = uc.user_id
     JOIN notification_settings ns ON d.user_id = ns.user_id
+    JOIN users u ON d.user_id = u.id
     WHERE uc.course_id = %s 
       AND d.fcm_token IS NOT NULL
-      AND ns.notify_on_new_assignment = True; -- השם המדויק מהתמונה שלך
+      AND ns.notify_on_new = True;
     """
     with get_conn() as conn:
-        with conn.cursor() as cur:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(query, (course_id,))
-            return [row[0] for row in cur.fetchall()]
+            return cur.fetchall()
          
 def assignment_exists(moodle_assign_id):
     """בודקת אם המטלה כבר רשומה במערכת שלנו"""

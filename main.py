@@ -31,7 +31,8 @@ from database import (
     get_all_assignments,
     get_pending_reminders,
     update_last_notified,
-    update_assignment_note
+    update_assignment_note,
+    update_user_language 
 )
 from security import (
     create_access_token,
@@ -448,13 +449,14 @@ def update_settings(body: NotificationSettingsUpdate, authorization: Optional[st
 
 class DeviceTokenRequest(BaseModel):
     token: str
+    language: str = "he"  # ברירת מחדל
 
 @app.post("/api/notifications/register-device")
 def register_device(req: DeviceTokenRequest, authorization: Optional[str] = Header(None)):
     user_id = get_current_user_id(authorization)
     register_device_token(user_id, req.token)
+    update_user_language(user_id, req.language)
     return {"success": True, "message": "Device registered successfully"}
-
 
 # --- הגדרת המשימה  ---
 def discovery_task():
@@ -464,63 +466,68 @@ def discovery_task():
         reps = get_active_course_representatives()
         for rep in reps:
             token_plain = decrypt_token(rep['moodle_token'])
-            moodle_data = get_assignments_for_courses(token_plain, [rep['course_id']])
-                        
-            for course in moodle_data:
-                for assign in course.get("assignments", []):
-                    moodle_id = assign["id"]
-                    new_due_date_ts = assign.get("duedate")
-                    new_due_date_dt = datetime.utcfromtimestamp(new_due_date_ts) if new_due_date_ts else None
-                    
-                    # נניח שאתה מוסיף פונקציה שמחזירה את המטלה מה-DB (או None אם לא קיימת)
-                    existing_assign = get_assignment_by_moodle_id(moodle_id) 
-                    
-                    # 1. גילוי מטלה חדשה לגמרי
-                    if not existing_assign:
-                        print(f"! גילוי חדש: {assign['name']} בקורס {rep['course_name']}")
-                        assign_db_id = save_new_assignment_globally(
-                            rep['course_id'], 
-                            rep['course_name'], # <--- זה מה שהיה חסר!
-                            assign
-    )
-                        
-                        link_assignment_to_course_users(assign_db_id, rep['course_id'])
-                        
-                        tokens = get_tokens_for_course(rep['course_id'])
-                        if tokens:
-                            send_push_notifications(tokens, f"מטלה חדשה: {assign['name']}")
-                            
-                        
-                    # 2. גילוי שינוי תאריך במטלה קיימת
-                    elif existing_assign.get("due_date") != new_due_date_dt:
-                        print(f"!!! שינוי תאריך: {assign['name']} בקורס {rep['course_name']}")
-                        update_assignment_due_date(moodle_id, new_due_date_ts) # פונקציה לעדכון תאריך בלבד
-                        
-                        tokens = get_tokens_for_course(rep['course_id'])
-                        if tokens:
-                            send_push_notifications(tokens, f"עודכן תאריך הגשה: {assign['name']}")
-                
-            # --- סריקת בחנים (Quizzes) ---
-            quizzes_data = get_quizzes_for_courses(token_plain, [rep['course_id']])
-            for quiz in quizzes_data:
-                moodle_id = quiz["id"]
-                new_due_date_ts = quiz.get("timeclose")
+            
+            # --- שליפה של שני הסוגים ---
+            moodle_assignments = get_assignments_for_courses(token_plain, [rep['course_id']])
+            moodle_quizzes = get_quizzes_for_courses(token_plain, [rep['course_id']])
+            
+            # --- איחוד לרשימה אחת גנרית ---
+            all_items = []
+            for course in moodle_assignments:
+                for item in course.get("assignments", []):
+                    all_items.append({
+                        "id": item["id"], "name": item["name"], 
+                        "due_date_ts": item.get("duedate"), 
+                        "raw_data": item, "type": "assign"
+                    })
+            for quiz in moodle_quizzes:
+                all_items.append({
+                    "id": quiz["id"], "name": quiz["name"], 
+                    "due_date_ts": quiz.get("timeclose"), 
+                    "raw_data": quiz, "type": "quiz"
+                })
+
+            # --- ריצה על הרשימה המאוחדת ---
+            for item in all_items:
+                moodle_id = item["id"]
+                new_due_date_ts = item["due_date_ts"]
                 new_due_date_dt = datetime.utcfromtimestamp(new_due_date_ts) if new_due_date_ts else None
+                item_type = item["type"]
                 
-                existing_quiz = get_assignment_by_moodle_id(moodle_id, 'quiz')
+                existing_item = get_assignment_by_moodle_id(moodle_id, item_type)
                 
-                if not existing_quiz:
-                    print(f"! גילוי בוחן חדש: {quiz['name']} בקורס {rep['course_name']}")
-                    quiz_db_id = save_new_assignment_globally(rep['course_id'], rep['course_name'], quiz, 'quiz')
-                    link_assignment_to_course_users(quiz_db_id, rep['course_id'])
-                    tokens = get_tokens_for_course(rep['course_id'])
-                    if tokens: send_push_notifications(tokens, f"בוחן חדש: {quiz['name']}")
+                # יצירת שם קצר להודעה (גבול של 3 מילים)
+                words = item["name"].split()
+                short_title = " ".join(words[:3]) + ("..." if len(words) > 3 else "")
+                
+                # --- גילוי משימה חדשה ---
+                if not existing_item:
+                    print(f"! גילוי חדש: {item['name']} בקורס {rep['course_name']}")
+                    db_id = save_new_assignment_globally(rep['course_id'], rep['course_name'], item["raw_data"], item_type)
+                    link_assignment_to_course_users(db_id, rep['course_id'])
+                    
+                    tokens_data = get_tokens_for_course(rep['course_id'])
+                    for user_device in tokens_data:
+                        lang = user_device.get('language', 'he')
+                        if lang == 'en':
+                            msg = f"🆕 New task! '{short_title}' in '{rep['course_name']}'"
+                        else:
+                            msg = f"🆕 מטלה חדשה! '{short_title}' בקורס '{rep['course_name']}'"
+                        send_push_notification(user_device['fcm_token'], "MyTasks", msg)
                         
-                elif existing_quiz.get("due_date") != new_due_date_dt:
-                    print(f"!!! שינוי תאריך בוחן: {quiz['name']} בקורס {rep['course_name']}")
-                    update_assignment_due_date(moodle_id, new_due_date_ts, 'quiz')
-                    tokens = get_tokens_for_course(rep['course_id'])
-                    if tokens: send_push_notifications(tokens, f"עודכן תאריך לבוחן: {quiz['name']}")
+                # --- שינוי תאריך ---
+                elif existing_item.get("due_date") != new_due_date_dt:
+                    print(f"!!! שינוי תאריך: {item['name']} בקורס {rep['course_name']}")
+                    update_assignment_due_date(moodle_id, new_due_date_ts, item_type)
+                    
+                    tokens_data = get_tokens_for_course(rep['course_id'])
+                    for user_device in tokens_data:
+                        lang = user_device.get('language', 'he')
+                        if lang == 'en':
+                            msg = f"📅 Due date updated: '{short_title}' in '{rep['course_name']}'"
+                        else:
+                            msg = f"📅 עודכן תאריך הגשה: '{short_title}' בקורס '{rep['course_name']}'"
+                        send_push_notification(user_device['fcm_token'], "MyTasks", msg)
 
     except Exception as e:
         print(f"שגיאה קריטית בסריקה: {e}")
@@ -566,8 +573,8 @@ def reminder_task():
                     message = f"{emoji} המטלה '{short_title}' מקורס '{row['course']}' מסתיימת בעוד פחות מ-{target_threshold} שעות!"
 
                 else :
-                         target_threshold_to_days = int(target_threshold/24)
-                         message = f"{emoji} המטלה '{short_title}' מקורס '{row['course']}' מסתיימת בעוד פחות מ-{target_threshold_to_days} ימים!"
+                        target_threshold_to_days = int(target_threshold/24)
+                        message = f"{emoji} המטלה '{short_title}' מקורס '{row['course']}' מסתיימת בעוד פחות מ-{target_threshold_to_days} ימים!"
                 
                 send_push_notification(row['fcm_token'], "MyTasks - זמן להגשה", message)
                 update_last_notified(row['ua_id'], target_threshold)

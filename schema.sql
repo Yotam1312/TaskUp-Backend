@@ -80,3 +80,4 @@ CREATE TABLE user_courses (
 );
 
 ALTER TABLE assignments ADD COLUMN item_type VARCHAR(50) DEFAULT 'assign';
+ALTER TABLE users ADD COLUMN language VARCHAR(10) DEFAULT 'he';
