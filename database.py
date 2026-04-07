@@ -91,8 +91,8 @@ def save_assignments(user_id: int, assignments: list[dict]):
     - מחשב ושומר סטטוס הגשה באיחור
     """
     upsert_assign = """
-    INSERT INTO assignments (moodle_assign_id, title, course, open_date, due_date, link)
-    VALUES (%s, %s, %s, %s, %s, %s)
+    INSERT INTO assignments (moodle_assign_id, item_type, title, course, open_date, due_date, link)
+    VALUES (%s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (link) DO UPDATE SET
         title    = EXCLUDED.title,
         due_date = EXCLUDED.due_date
