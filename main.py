@@ -30,7 +30,8 @@ from database import (
     link_assignment_to_course_users,
     get_all_assignments,
     get_pending_reminders,
-    update_last_notified
+    update_last_notified,
+    update_assignment_note
 )
 from security import (
     create_access_token,
@@ -39,7 +40,8 @@ from security import (
     decrypt_token
 )
 from models import (
-    NotificationSettingsUpdate
+    NotificationSettingsUpdate,
+    AssignmentNoteUpdate
 )
 
 load_dotenv()
@@ -329,6 +331,30 @@ def unmark_submitted(assignment_id: int, authorization: Optional[str] = Header(N
     return {"success": True}
 
 
+@app.patch("/api/assignments/{assignment_id}/note")
+def update_note(
+    assignment_id: int,
+    body: AssignmentNoteUpdate,
+    authorization: Optional[str] = Header(None)
+):
+    user_id = get_current_user_id(authorization)
+
+    note = body.note
+    if note is not None:
+        note = note.strip()
+        if note == "":
+            note = None
+
+    if note is not None and len(note) > 50:
+        raise HTTPException(status_code=422, detail="Note max length is 50 characters")
+
+    updated = update_assignment_note(assignment_id, user_id, note)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Assignment not found")
+
+    return {"success": True, "assignment_id": assignment_id, "note": note}
+
+
 @app.get("/api/assignments/all")
 def get_all(authorization: Optional[str] = Header(None)):
     user_id = get_current_user_id(authorization)
@@ -536,13 +562,12 @@ def reminder_task():
                 words = row['title'].split()
                 short_title = " ".join(words[:3]) + ("..." if len(words) > 3 else "")
                 emoji = "🚨" if target_threshold <= 2 else "⏰" if target_threshold <= 12 else "⏳"
-                    
                 if target_threshold < 25 :
                     message = f"{emoji} המטלה '{short_title}' מקורס '{row['course']}' מסתיימת בעוד פחות מ-{target_threshold} שעות!"
 
-                else:
-                        target_threshold_to_days = int(target_threshold/24)
-                        message = f"{emoji} המטלה '{short_title}' מקורס '{row['course']}' מסתיימת בעוד פחות מ-{target_threshold_to_days} ימים!"
+                else :
+                         target_threshold_to_days = int(target_threshold/24)
+                         message = f"{emoji} המטלה '{short_title}' מקורס '{row['course']}' מסתיימת בעוד פחות מ-{target_threshold_to_days} ימים!"
                 
                 send_push_notification(row['fcm_token'], "MyTasks - זמן להגשה", message)
                 update_last_notified(row['ua_id'], target_threshold)
