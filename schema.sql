@@ -78,3 +78,5 @@ CREATE TABLE user_courses (
     course_id        INTEGER REFERENCES courses(id) ON DELETE CASCADE,
     PRIMARY KEY (user_id, course_id)
 );
+
+ALTER TABLE assignments ADD COLUMN item_type VARCHAR(50) DEFAULT 'assign';

@@ -118,6 +118,7 @@ def save_assignments(user_id: int, assignments: list[dict]):
 
                 cur.execute(upsert_assign, (
                     task["moodle_assign_id"],
+                    task.get("item_type", "assign"),
                     task["title"],
                     task["course"],
                     open_date,
@@ -351,50 +352,49 @@ def assignment_exists(moodle_assign_id):
             return cur.fetchone() is not None
         
 # בתוך database.py
-def save_new_assignment_globally(course_id, course_name, assign):
+def save_new_assignment_globally(course_id, course_name, assign, item_type='assign'):
     query = """
-        INSERT INTO assignments (moodle_assign_id, title, course, open_date, due_date, link)
-        VALUES (%s, %s, %s, %s, %s, %s)
+        INSERT INTO assignments (moodle_assign_id, item_type, title, course, open_date, due_date, link)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (link) DO UPDATE SET title = EXCLUDED.title 
         RETURNING id;
     """
     with get_conn() as conn:
         with conn.cursor() as cur:
             # המרה קריטית: ממסר (int) לאובייקט תאריך של פייתון
-            open_ts = assign.get('allowsubmissionsfromdate')
-            due_ts = assign.get('duedate')
+            open_ts = assign.get('allowsubmissionsfromdate') or assign.get('timeopen')
+            due_ts = assign.get('duedate') or assign.get('timeclose')
             
-# החלף את שתי השורות האלו:
             open_date = datetime.utcfromtimestamp(open_ts) if open_ts else None
             due_date = datetime.utcfromtimestamp(due_ts) if due_ts else None
             
+            link_url = f"https://moodle.ruppin.ac.il/mod/quiz/view.php?id={assign.get('coursemodule')}" if item_type == 'quiz' else f"https://moodle.ruppin.ac.il/mod/assign/view.php?id={assign.get('cmid')}"
             
             cur.execute(query, (
                 assign['id'], 
+                item_type,
                 assign['name'], 
-                course_name, # שימוש בשם הקורס ולא ב-ID
+                course_name,
                 open_date, 
                 due_date,
-                f"https://moodle.ruppin.ac.il/mod/assign/view.php?id={assign.get('cmid')}"
+                link_url
             ))
             return cur.fetchone()[0]
             
-def get_assignment_by_moodle_id(moodle_assign_id: int) -> dict | None:
-    """שולף מטלה קיימת לפי מזהה מודל כדי לבדוק שינויים"""
-    query = "SELECT id, due_date FROM assignments WHERE moodle_assign_id = %s LIMIT 1;"
+def get_assignment_by_moodle_id(moodle_assign_id: int, item_type: str = 'assign') -> dict | None:
+    query = "SELECT id, due_date FROM assignments WHERE moodle_assign_id = %s AND item_type = %s LIMIT 1;"
     with get_conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(query, (moodle_assign_id,))
+            cur.execute(query, (moodle_assign_id, item_type))
             row = cur.fetchone()
     return dict(row) if row else None
 
-def update_assignment_due_date(moodle_assign_id: int, new_due_date_ts: int):
-    """מעדכן רק את תאריך ההגשה של מטלה קיימת"""
+def update_assignment_due_date(moodle_assign_id: int, new_due_date_ts: int, item_type: str = 'assign'):
     due_date_dt = datetime.utcfromtimestamp(new_due_date_ts) if new_due_date_ts else None
-    query = "UPDATE assignments SET due_date = %s WHERE moodle_assign_id = %s;"
+    query = "UPDATE assignments SET due_date = %s WHERE moodle_assign_id = %s AND item_type = %s;"
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(query, (due_date_dt, moodle_assign_id))
+            cur.execute(query, (due_date_dt, moodle_assign_id, item_type))
 
 def link_assignment_to_course_users(assign_id: int, course_id: int):
     query = """
@@ -442,6 +442,7 @@ def get_pending_reminders():
         a.course,
         a.due_date,
         a.moodle_assign_id, -- דרוש לבדיקה מול מודל
+        a.item_type,
         ns.hours_before,
         d.fcm_token,
         u.moodle_token,      -- דרוש לבדיקה מול מודל

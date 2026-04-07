@@ -146,6 +146,35 @@ def get_submission_status(wstoken: str, userid: int, assign_id: int):
         return res["lastattempt"]["submission"].get("status", "new")
     return "new"
 
+def get_quizzes_for_courses(wstoken: str, course_ids: list):
+    params = {
+        "wstoken": wstoken,
+        "wsfunction": "mod_quiz_get_quizzes_by_courses",
+        "moodlewsrestformat": "json"
+    }
+    for i, cid in enumerate(course_ids):
+        params[f"courseids[{i}]"] = cid
+    res = requests.get(MOODLE_URL, params=params).json()
+    return res.get("quizzes", [])
+
+def get_quiz_submission_status(wstoken: str, userid: int, quiz_id: int):
+    params = {
+        "wstoken": wstoken,
+        "wsfunction": "mod_quiz_get_user_attempts",
+        "quizid": quiz_id,
+        "userid": userid,
+        "status": "all",
+        "moodlewsrestformat": "json"
+    }
+    res = requests.get(MOODLE_URL, params=params).json()
+    attempts = res.get("attempts", [])
+    if attempts:
+        # בודקים אם יש ניסיון שהסטטוס שלו 'finished'
+        for attempt in attempts:
+            if attempt.get("state") == "finished":
+                return "submitted"
+    return "new"
+
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 
@@ -372,6 +401,21 @@ def sync_assignments(authorization: Optional[str] = Header(None)):
                     "link": f"https://moodle.ruppin.ac.il/mod/assign/view.php?id={assign['cmid']}",
                     "is_submitted": status == "submitted"
                 })
+        # --- סנכרון בחנים (Quizzes) ---
+        quizzes_data = get_quizzes_for_courses(wstoken, course_ids)
+        for quiz in quizzes_data:
+            course_name = course_map.get(quiz["course"], "קורס לא ידוע")
+            status = get_quiz_submission_status(wstoken, moodle_userid, quiz["id"])
+            assignments_to_save.append({
+                "moodle_assign_id": quiz["id"],
+                "item_type": "quiz",
+                "title": quiz["name"],
+                "course": course_name,
+                "open_date": quiz.get("timeopen"),
+                "due_date": quiz.get("timeclose"),
+                "link": f"https://moodle.ruppin.ac.il/mod/quiz/view.php?id={quiz['coursemodule']}",
+                "is_submitted": status == "submitted"
+            })
 
     save_assignments(user_id, assignments_to_save)
     return {"success": True, "synced": len(assignments_to_save)}
@@ -455,6 +499,28 @@ def discovery_task():
                         tokens = get_tokens_for_course(rep['course_id'])
                         if tokens:
                             send_push_notifications(tokens, f"עודכן תאריך הגשה: {assign['name']}")
+                
+            # --- סריקת בחנים (Quizzes) ---
+            quizzes_data = get_quizzes_for_courses(token_plain, [rep['course_id']])
+            for quiz in quizzes_data:
+                moodle_id = quiz["id"]
+                new_due_date_ts = quiz.get("timeclose")
+                new_due_date_dt = datetime.utcfromtimestamp(new_due_date_ts) if new_due_date_ts else None
+                
+                existing_quiz = get_assignment_by_moodle_id(moodle_id, 'quiz')
+                
+                if not existing_quiz:
+                    print(f"! גילוי בוחן חדש: {quiz['name']} בקורס {rep['course_name']}")
+                    quiz_db_id = save_new_assignment_globally(rep['course_id'], rep['course_name'], quiz, 'quiz')
+                    link_assignment_to_course_users(quiz_db_id, rep['course_id'])
+                    tokens = get_tokens_for_course(rep['course_id'])
+                    if tokens: send_push_notifications(tokens, f"בוחן חדש: {quiz['name']}")
+                        
+                elif existing_quiz.get("due_date") != new_due_date_dt:
+                    print(f"!!! שינוי תאריך בוחן: {quiz['name']} בקורס {rep['course_name']}")
+                    update_assignment_due_date(moodle_id, new_due_date_ts, 'quiz')
+                    tokens = get_tokens_for_course(rep['course_id'])
+                    if tokens: send_push_notifications(tokens, f"עודכן תאריך לבוחן: {quiz['name']}")
 
     except Exception as e:
         print(f"שגיאה קריטית בסריקה: {e}")
@@ -479,13 +545,18 @@ def reminder_task():
             if row['last_notified_hours'] != target_threshold:
                 # --- בדיקת "ברגע האחרון" מול המודל ---
                 token_plain = decrypt_token(row['moodle_token'])
-                moodle_status = get_submission_status(token_plain, row['moodle_user_id'], row['moodle_assign_id'])
+                
+                if row['item_type'] == 'quiz':
+                    moodle_status = get_quiz_submission_status(token_plain, row['moodle_user_id'], row['moodle_assign_id'])
+                    item_label = "הבוחן"
+                else:
+                    moodle_status = get_submission_status(token_plain, row['moodle_user_id'], row['moodle_assign_id'])
+                    item_label = "המטלה"
                 
                 if moodle_status == "submitted":
-                    # המשתמש הגיש במודל! נעדכן את ה-DB ולא נשלח פוש
-                    print(f"-> המשתמש הגיש במודל. מעדכן DB עבור מטלה {row['title']} ומבטל התראה.")
+                    print(f"-> המשתמש הגיש במודל. מעדכן DB עבור {item_label} {row['title']} ומבטל התראה.")
                     update_user_assignment(row['ua_id'], row['user_id'], is_submitted=True)
-                    continue 
+                    continue
 
                 # אם באמת לא הוגש - שולחים את ההתראה המעוצבת
                 words = row['title'].split()
@@ -552,3 +623,13 @@ def send_push_notifications(tokens, message_body):
         client.publish_multiple(messages)
     except Exception as e:
         print(f"שגיאה בשליחת פושים: {e}")
+        
+        
+@app.get("/api/admin/scan")
+def manual_discovery():
+    """
+    URL שמפעיל את סריקת המטלות החדשות באופן ידני.
+    """
+    print("🚀 מפעיל סריקה ידנית של המודל...")
+    discovery_task()
+    return {"status": "Discovery task triggered successfully", "time": datetime.now().strftime('%H:%M:%S')}
