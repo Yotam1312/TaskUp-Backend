@@ -256,7 +256,7 @@ def upsert_notification_settings(user_id: int, hours_before: list, notify_on_new
     """
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(query, (user_id, hours_before, notify_on_new, notify_on_change))    
+            cur.execute(query, (user_id, hours_before, notify_on_new, notify_on_change))   
             
             
 
@@ -343,7 +343,7 @@ def get_tokens_for_course(course_id):
     JOIN users u ON d.user_id = u.id
     WHERE uc.course_id = %s 
       AND d.fcm_token IS NOT NULL
-      AND ns.notify_on_new = True;
+      AND ns.notify_on_new_assignment = True;
     """
     with get_conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
