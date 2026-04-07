@@ -614,16 +614,18 @@ def start_scheduler():
 @app.get("/")
 def home():
     return {"status": "running"}
-
+#פונקציה 
 def send_push_notifications(tokens, message_body):
-    """שולחת התראות לכל הטוקנים שברשימה דרך Expo"""
-    client = PushClient()
-    messages = [PushMessage(to=token, body=message_body, sound="default") for token in tokens]
-    try:
-        client.publish_multiple(messages)
-    except Exception as e:
-        print(f"שגיאה בשליחת פושים: {e}")
-        
+    """שולחת התראות לכל הטוקנים שברשימה באמצעות הפונקציה הבסיסית שעובדת"""
+    for token in tokens:
+        try:
+            send_push_notification(
+                expo_token=token,
+                title="MyTasks",
+                body=message_body
+            )
+        except Exception as e:
+            print(f"שגיאה בשליחת פוש לטוקן {token}: {e}")
         
 @app.get("/api/admin/scan")
 def manual_discovery():
