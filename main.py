@@ -507,21 +507,15 @@ def reminder_task():
                 words = row['title'].split()
                 short_title = " ".join(words[:3]) + ("..." if len(words) > 3 else "")
                 emoji = "🚨" if target_threshold <= 2 else "⏰" if target_threshold <= 12 else "⏳"
+                title = "מועד ההגשה מתקרב!"
                 
-                if lang == 'en':
-                    if target_threshold < 25:
-                        message = f"{emoji} {item_label} '{short_title}' from '{row['course']}' ends in less than {target_threshold} hours!"
-                    else:
-                        days = int(target_threshold / 24)
-                        message = f"{emoji} {item_label} '{short_title}' from '{row['course']}' ends in less than {days} days!"
+                if target_threshold < 25:
+                        message = f"{item_label} '{short_title}' מקורס '{row['course']}' מסתיימת בעוד פחות מ-{target_threshold} שעות! {emoji}"
                 else:
-                    if target_threshold < 25:
-                        message = f"{emoji} {item_label} '{short_title}' מקורס '{row['course']}' מסתיימת בעוד פחות מ-{target_threshold} שעות!"
-                    else:
                         days = int(target_threshold / 24)
-                        message = f"{emoji} {item_label} '{short_title}' מקורס '{row['course']}' מסתיימת בעוד פחות מ-{days} ימים!"
+                        message = f"{item_label} '{short_title}' מקורס '{row['course']}' מסתיימת בעוד פחות מ-{days} ימים! {emoji}"
                 
-                send_push_notification(row['fcm_token'], "MyTask ", message)
+                send_push_notification(row['fcm_token'], title, message)
                 update_last_notified(row['ua_id'], target_threshold)
                 
     except Exception as e:
@@ -594,11 +588,12 @@ def notify_course_users(course_id: int, course_name: str, short_title: str, is_n
     for user_device in tokens_data:
         lang = user_device.get('language', 'he')
         if is_new:
-            msg = f"🆕 New task! '{short_title}' in '{course_name}'" if lang == 'en' else f"🆕 מטלה חדשה! '{short_title}' בקורס '{course_name}'"
+            title = "מטלה חדשה"
+            msg = f' נוספה מטלה חדשה "{short_title}" בקורס "{course_name}"'
         else:
-            msg = f"📅 Due date updated: '{short_title}' in '{course_name}'" if lang == 'en' else f"📅 עודכן תאריך הגשה: '{short_title}' בקורס '{course_name}'"
-        
-        send_push_notification(user_device['fcm_token'], "MyTasks", msg)
+            title = "שינוי במועד ההגשה"
+            msg = f'עודכן תאריך הגשה עבור "{short_title}" בקורס "{course_name}"'
+        send_push_notification(user_device['fcm_token'], title, msg)
 
 
 def run_discovery_engine(course_id: int, course_name: str, token_plain: str):
