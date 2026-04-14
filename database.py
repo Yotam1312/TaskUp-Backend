@@ -24,18 +24,13 @@ def get_conn():
 
 # ── Users ──────────────────────────────────────────────────────────────────────
 
-def save_user_to_db(name: str, moodle_token: str, moodle_user_id: int) -> int:
-    """
-    Insert or update user by moodle_user_id.
-    מצפין את ה-wstoken לפני שמירה.
-    Returns our DB id.
-    """
+def save_user_to_db(name: str, moodle_token: str, moodle_user_id: int, institution: str) -> int:
     encrypted_token = encrypt_token(moodle_token)
 
     query = """
-    INSERT INTO users (name, moodle_token, moodle_user_id)
-    VALUES (%s, %s, %s)
-    ON CONFLICT (moodle_user_id)
+    INSERT INTO users (name, moodle_token, moodle_user_id, institution)
+    VALUES (%s, %s, %s, %s)
+    ON CONFLICT (moodle_user_id, institution)
     DO UPDATE SET
         name         = EXCLUDED.name,
         moodle_token = EXCLUDED.moodle_token,
@@ -44,17 +39,18 @@ def save_user_to_db(name: str, moodle_token: str, moodle_user_id: int) -> int:
     """
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(query, (name, encrypted_token, moodle_user_id))
+            cur.execute(query, (name, encrypted_token, moodle_user_id, institution))
             user_id = cur.fetchone()[0]
     return user_id
 
 
 def get_user_by_id(user_id: int) -> dict | None:
     """
-    שולף משתמש לפי ID.
+    שולף משתמש לפי ID כולל המוסד שלו.
     מפענח את ה-wstoken אוטומטית.
     """
-    query = "SELECT id, name, moodle_token, moodle_user_id FROM users WHERE id = %s"
+    # הוספנו את institution ל-SELECT
+    query = "SELECT id, name, moodle_token, moodle_user_id, institution FROM users WHERE id = %s"
     with get_conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(query, (user_id,))
@@ -62,7 +58,7 @@ def get_user_by_id(user_id: int) -> dict | None:
     if not row:
         return None
     user = dict(row)
-    user["moodle_token"] = decrypt_token(user["moodle_token"])  # פענוח אוטומטי
+    user["moodle_token"] = decrypt_token(user["moodle_token"])
     return user
 
 
@@ -317,11 +313,10 @@ def sync_user_courses(user_id, courses_list):
                 """, (user_id, course['id']))
 
 def get_active_course_representatives():
-    """שולפת נציג אחד (ID וטוקן) לכל קורס שפעיל כרגע לפי תאריכים"""
     query = """
     SELECT DISTINCT ON (c.id) 
            c.id as course_id, c.fullname as course_name,
-           u.id as user_id, u.moodle_token
+           u.id as user_id, u.moodle_token, u.institution
     FROM courses c
     JOIN user_courses uc ON c.id = uc.course_id
     JOIN users u ON uc.user_id = u.id
@@ -333,7 +328,6 @@ def get_active_course_representatives():
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(query)
             return cur.fetchall()
-
 def get_tokens_for_course(course_id):
     query = """
     SELECT d.fcm_token, u.language
@@ -359,7 +353,7 @@ def assignment_exists(moodle_assign_id):
             return cur.fetchone() is not None
         
 # בתוך database.py
-def save_new_assignment_globally(course_id, course_name, assign, item_type='assign'):
+def save_new_assignment_globally(course_id, course_name, assign, base_url, item_type='assign'):
     query = """
         INSERT INTO assignments (moodle_assign_id, item_type, title, course, open_date, due_date, link)
         VALUES (%s, %s, %s, %s, %s, %s, %s)
@@ -368,24 +362,15 @@ def save_new_assignment_globally(course_id, course_name, assign, item_type='assi
     """
     with get_conn() as conn:
         with conn.cursor() as cur:
-            # המרה קריטית: ממסר (int) לאובייקט תאריך של פייתון
             open_ts = assign.get('allowsubmissionsfromdate') or assign.get('timeopen')
             due_ts = assign.get('duedate') or assign.get('timeclose')
-            
             open_date = datetime.utcfromtimestamp(open_ts) if open_ts else None
             due_date = datetime.utcfromtimestamp(due_ts) if due_ts else None
             
-            link_url = f"https://moodle.ruppin.ac.il/mod/quiz/view.php?id={assign.get('coursemodule')}" if item_type == 'quiz' else f"https://moodle.ruppin.ac.il/mod/assign/view.php?id={assign.get('cmid')}"
+            # הלינק מיוצר דינמית במקום ההארד קוד הישן
+            link_url = f"{base_url}/mod/quiz/view.php?id={assign.get('coursemodule')}" if item_type == 'quiz' else f"{base_url}/mod/assign/view.php?id={assign.get('cmid')}"
             
-            cur.execute(query, (
-                assign['id'], 
-                item_type,
-                assign['name'], 
-                course_name,
-                open_date, 
-                due_date,
-                link_url
-            ))
+            cur.execute(query, (assign['id'], item_type, assign['name'], course_name, open_date, due_date, link_url))
             return cur.fetchone()[0]
             
 def get_assignment_by_moodle_id(moodle_assign_id: int, item_type: str = 'assign') -> dict | None:
@@ -442,19 +427,10 @@ def get_all_assignments(user_id: int) -> list[dict]:
 def get_pending_reminders():
     query = """
     SELECT
-        ua.id AS ua_id,
-        ua.user_id,
-        ua.last_notified_hours,
-        a.title,
-        a.course,
-        a.due_date,
-        a.moodle_assign_id,
-        a.item_type,
-        ns.hours_before,
-        d.fcm_token,
-        u.moodle_token,
-        u.moodle_user_id,
-        u.language           -- <--- התוספת כאן
+        ua.id AS ua_id, ua.user_id, ua.last_notified_hours,
+        a.title, a.course, a.due_date, a.moodle_assign_id, a.item_type,
+        ns.hours_before, d.fcm_token, u.moodle_token, u.moodle_user_id,
+        u.language, u.institution
     FROM user_assignments ua
     JOIN assignments a ON ua.assignment_id = a.id
     JOIN notification_settings ns ON ua.user_id = ns.user_id

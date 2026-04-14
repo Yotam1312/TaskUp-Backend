@@ -7,8 +7,10 @@ CREATE TABLE users (
     name            VARCHAR(200)    NOT NULL,
     moodle_token    VARCHAR(500)    NOT NULL,
     moodle_user_id  INTEGER         NOT NULL UNIQUE,
+    institution     VARCHAR(50)     NOT NULL DEFAULT 'ruppin',
     created_at      TIMESTAMP       DEFAULT NOW(),
-    last_updated    TIMESTAMP       DEFAULT NOW()
+    last_updated    TIMESTAMP       DEFAULT NOW(),
+    UNIQUE (moodle_user_id, institution)
 );
 
 -- ============================================================

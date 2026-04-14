@@ -59,14 +59,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-MOODLE_URL = "https://moodle.ruppin.ac.il/webservice/rest/server.php"
-LOGIN_URL = "https://moodle.ruppin.ac.il/login/token.php"
+
+
 
 
 # --- Models ---
 class LoginRequest(BaseModel):
     username: str
     password: str
+    institution: str
 
 class RefreshRequest(BaseModel):
     refresh_token: str
@@ -121,20 +122,19 @@ def send_push_notification(expo_token: str, title: str, body: str):
         return None
 
 # --- Helper Functions for Moodle API (לא שונה כלום) ---
-def get_user_courses(wstoken: str, userid: int):
+def get_user_courses(wstoken: str, userid: int, api_url: str):
     params = {
         "wstoken": wstoken,
         "wsfunction": "core_enrol_get_users_courses",
         "userid": userid,
         "moodlewsrestformat": "json"
     }
-    res = requests.get(MOODLE_URL, params=params).json()
-    
+    res = requests.get(api_url, params=params).json() # משתמש ב-api_url הדינמי
     if isinstance(res, dict) and "exception" in res:
         raise HTTPException(status_code=400, detail="Invalid token or user ID")
     return res
 
-def get_assignments_for_courses(wstoken: str, course_ids: list):
+def get_assignments_for_courses(wstoken: str, course_ids: list,api_url: str):
     params = {
         "wstoken": wstoken,
         "wsfunction": "mod_assign_get_assignments",
@@ -142,10 +142,10 @@ def get_assignments_for_courses(wstoken: str, course_ids: list):
     }
     for i, cid in enumerate(course_ids):
         params[f"courseids[{i}]"] = cid
-    res = requests.get(MOODLE_URL, params=params).json()
+    res = requests.get(api_url, params=params).json()
     return res.get("courses", [])
 
-def get_submission_status(wstoken: str, userid: int, assign_id: int):
+def get_submission_status(wstoken: str, userid: int, assign_id: int,api_url: str):
     params = {
         "wstoken": wstoken,
         "wsfunction": "mod_assign_get_submission_status",
@@ -153,12 +153,12 @@ def get_submission_status(wstoken: str, userid: int, assign_id: int):
         "userid": userid,
         "moodlewsrestformat": "json"
     }
-    res = requests.get(MOODLE_URL, params=params).json()
+    res = requests.get(api_url, params=params).json()
     if "lastattempt" in res and "submission" in res["lastattempt"]:
         return res["lastattempt"]["submission"].get("status", "new")
     return "new"
 
-def get_quizzes_for_courses(wstoken: str, course_ids: list):
+def get_quizzes_for_courses(wstoken: str, course_ids: list,api_url: str):
     params = {
         "wstoken": wstoken,
         "wsfunction": "mod_quiz_get_quizzes_by_courses",
@@ -166,10 +166,10 @@ def get_quizzes_for_courses(wstoken: str, course_ids: list):
     }
     for i, cid in enumerate(course_ids):
         params[f"courseids[{i}]"] = cid
-    res = requests.get(MOODLE_URL, params=params).json()
+    res = requests.get(api_url, params=params).json()
     return res.get("quizzes", [])
 
-def get_quiz_submission_status(wstoken: str, userid: int, quiz_id: int):
+def get_quiz_submission_status(wstoken: str, userid: int, quiz_id: int, api_url: str):
     params = {
         "wstoken": wstoken,
         "wsfunction": "mod_quiz_get_user_attempts",
@@ -178,7 +178,7 @@ def get_quiz_submission_status(wstoken: str, userid: int, quiz_id: int):
         "status": "all",
         "moodlewsrestformat": "json"
     }
-    res = requests.get(MOODLE_URL, params=params).json()
+    res = requests.get(api_url, params=params).json()
     attempts = res.get("attempts", [])
     if attempts:
         # בודקים אם יש ניסיון שהסטטוס שלו 'finished'
@@ -192,36 +192,47 @@ def get_quiz_submission_status(wstoken: str, userid: int, quiz_id: int):
 
 @app.post("/api/login")
 def login_to_moodle(req: LoginRequest):
-    # 1. התחברות למoodle (לא שונה)
+    # קביעת ה-URLs לפי המוסד
+    if req.institution == "bgu":
+        base_url = "https://moodle.bgu.ac.il/moodle"
+    else:
+        base_url = "https://moodle.ruppin.ac.il"
+
+    login_url = f"{base_url}/login/token.php"
+    moodle_api_url = f"{base_url}/webservice/rest/server.php"
+
+    # התחברות למודל
     params = {
         "username": req.username,
         "password": req.password,
         "service": "moodle_mobile_app"
     }
-    res = requests.get(LOGIN_URL, params=params).json()
-    print(f"DEBUG Moodle Response: success ")
+    res = requests.get(login_url, params=params).json()
 
     if "error" in res:
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     wstoken = res["token"]
 
-    # 2. שליפת userid ושם (לא שונה)
+    # שליפת מידע על המשתמש
     info_params = {
         "wstoken": wstoken,
         "wsfunction": "core_webservice_get_site_info",
         "moodlewsrestformat": "json"
     }
-    info_res = requests.get(MOODLE_URL, params=info_params).json()
+    info_res = requests.get(moodle_api_url, params=info_params).json()
     userid = info_res.get("userid")
     fullname = info_res.get("fullname")
 
-    # 3. שמירה בDB
+    # שמירה ב-DB (הוספנו את המוסד)
     user_id = save_user_to_db(
         name=fullname,
         moodle_token=wstoken,
-        moodle_user_id=userid
+        moodle_user_id=userid,
+        institution=req.institution
     )
+    
+    
 
     # # 4. שליפת מטלות ושמירה בDB (אותה לוגיקה כמו /api/tasks)
     # courses = get_user_courses(wstoken, userid)
@@ -262,6 +273,14 @@ def login_to_moodle(req: LoginRequest):
         "name": fullname,
         "access_token": access_token,
         "refresh_token": refresh_token
+    }
+    
+def get_moodle_urls(institution: str):
+    base = "https://moodle.bgu.ac.il/moodle" if institution == "bgu" else "https://moodle.ruppin.ac.il"
+    return {
+        "api": f"{base}/webservice/rest/server.php",
+        "login": f"{base}/login/token.php",
+        "base": base
     }
     
 @app.get("/api/test-notification")
@@ -381,29 +400,32 @@ def sync_assignments(authorization: Optional[str] = Header(None)):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
+    # שליפת הכתובות המתאימות למוסד של המשתמש הספציפי
+    urls = get_moodle_urls(user.get("institution", "ruppin"))
+    
     wstoken = user["moodle_token"]
     moodle_userid = user["moodle_user_id"]
 
-    courses = get_user_courses(wstoken, moodle_userid)
+    # העברת ה-API URL לפונקציית העזר
+    courses = get_user_courses(wstoken, moodle_userid, urls["api"])
     sync_user_courses(user_id, courses)
     
     assignments_to_save = []
     
     if courses:
         for course in courses:
-            # הנה ה-Crowdsourcing! התלמיד עושה סריקה ומודיע לכולם!
-            all_items = run_discovery_engine(course["id"], course["fullname"], wstoken)
+            # מעבירים את הכתובת גם למנוע הגילוי (Discovery Engine)
+            all_items = run_discovery_engine(course["id"], course["fullname"], wstoken, user.get("institution", "ruppin"))
             
-            # עכשיו משתמשים ברשימה המאוחדת שהמנוע החזיר כדי לעדכן אישית את התלמיד
-            # (בלי לפנות למודל שוב!)
             for item in all_items:
                 if item["type"] == "quiz":
-                    status = get_quiz_submission_status(wstoken, moodle_userid, item["id"])
-                    link = f"https://moodle.ruppin.ac.il/mod/quiz/view.php?id={item['raw_data']['coursemodule']}"
+                    # וודא שגם הפונקציה הזו עודכנה לקבל api_url
+                    status = get_quiz_submission_status(wstoken, moodle_userid, item["id"], urls["api"])
+                    link = f"{urls['base']}/mod/quiz/view.php?id={item['raw_data']['coursemodule']}"
                     open_date = item['raw_data'].get('timeopen')
                 else:
-                    status = get_submission_status(wstoken, moodle_userid, item["id"])
-                    link = f"https://moodle.ruppin.ac.il/mod/assign/view.php?id={item['raw_data']['cmid']}"
+                    status = get_submission_status(wstoken, moodle_userid, item["id"], urls["api"])
+                    link = f"{urls['base']}/mod/assign/view.php?id={item['raw_data']['cmid']}"
                     open_date = item['raw_data'].get('allowsubmissionsfromdate')
                 
                 assignments_to_save.append({
@@ -464,7 +486,7 @@ def discovery_task():
         reps = get_active_course_representatives()
         for rep in reps:
             token_plain = decrypt_token(rep['moodle_token'])
-            run_discovery_engine(rep['course_id'], rep['course_name'], token_plain)
+            run_discovery_engine(rep['course_id'], rep['course_name'], token_plain, rep.get('institution', 'ruppin'))
     except Exception as e:
         print(f"שגיאה קריטית בסריקה: {e}")
 
@@ -489,13 +511,14 @@ def reminder_task():
             
             if row['last_notified_hours'] != target_threshold:
                 token_plain = decrypt_token(row['moodle_token'])
+                urls = get_moodle_urls(row.get('institution', 'ruppin'))
                 
                 # --- בדיקת סטטוס הגשה ברגע האחרון ---
                 if row['item_type'] == 'quiz':
-                    moodle_status = get_quiz_submission_status(token_plain, row['moodle_user_id'], row['moodle_assign_id'])
+                    moodle_status = get_quiz_submission_status(token_plain, row['moodle_user_id'], row['moodle_assign_id'], urls['api'])
                     item_label = "הבוחן" if lang == 'he' else "The quiz"
                 else:
-                    moodle_status = get_submission_status(token_plain, row['moodle_user_id'], row['moodle_assign_id'])
+                    moodle_status = get_submission_status(token_plain, row['moodle_user_id'], row['moodle_assign_id'], urls['api'])
                     item_label = "המטלה" if lang == 'he' else "The task"
                 
                 if moodle_status == "submitted":
@@ -596,14 +619,20 @@ def notify_course_users(course_id: int, course_name: str, short_title: str, is_n
         send_push_notification(user_device['fcm_token'], title, msg)
 
 
-def run_discovery_engine(course_id: int, course_name: str, token_plain: str):
+def run_discovery_engine(course_id: int, course_name: str, token_plain: str, institution: str):
     """
+
     מנוע הסריקה המרכזי (Crowdsourced).
+
     מוריד ממודל -> מאחד -> מחפש דברים חדשים -> מעדכן DB גלובלי -> שולח פושים.
+
     מחזיר את הרשימה המאוחדת כדי שהסנכרון לא יצטרך לפנות למודל שוב.
+
     """
-    moodle_assignments = get_assignments_for_courses(token_plain, [course_id])
-    moodle_quizzes = get_quizzes_for_courses(token_plain, [course_id])
+    urls = get_moodle_urls(institution)
+    
+    moodle_assignments = get_assignments_for_courses(token_plain, [course_id], urls['api'])
+    moodle_quizzes = get_quizzes_for_courses(token_plain, [course_id], urls['api'])
     
     all_items = []
     for course in moodle_assignments:
@@ -626,7 +655,7 @@ def run_discovery_engine(course_id: int, course_name: str, token_plain: str):
         
         if not existing_item:
             print(f"! גילוי מנוע חכם: {item['name']} בקורס {course_name}")
-            db_id = save_new_assignment_globally(course_id, course_name, item["raw_data"], item_type=item_type)
+            db_id = save_new_assignment_globally(course_id, course_name, item["raw_data"], urls['base'], item_type=item_type)
             link_assignment_to_course_users(db_id, course_id)
             notify_course_users(course_id, course_name, short_title, is_new=True)
             
