@@ -140,6 +140,10 @@ def save_assignments(user_id: int, assignments: list[dict]):
 def get_assignments_for_user(user_id: int, submitted: bool, archived: bool) -> list[dict]:
     now_ts = "EXTRACT(EPOCH FROM NOW())"
     
+    # חצי שנה בשניות = 15552000
+    course_expired_cond = f"(c.id IS NOT NULL AND ((c.end_date > 0 AND c.end_date < {now_ts}) OR (COALESCE(c.end_date, 0) = 0 AND (COALESCE(c.start_date, 0) + 15552000) < {now_ts})))"
+    course_active_cond = f"(c.id IS NULL OR (c.end_date > 0 AND c.end_date >= {now_ts}) OR (COALESCE(c.end_date, 0) = 0 AND (COALESCE(c.start_date, 0) + 15552000) >= {now_ts}))"
+    
     query = f"""
     SELECT
         ua.id, a.title, a.course, a.open_date, a.due_date, a.link,
@@ -151,14 +155,11 @@ def get_assignments_for_user(user_id: int, submitted: bool, archived: bool) -> l
     """
     
     if archived:
-        # מופיע בארכיון אם: הועבר ידנית OR הקורס הסתיים
-        query += f" AND (ua.is_archived = TRUE OR (c.end_date IS NOT NULL AND c.end_date < {now_ts}))"
+        query += f" AND (ua.is_archived = TRUE OR {course_expired_cond})"
     elif submitted:
-        # מופיע בהושלמו אם: הוגש AND לא הועבר לארכיון ידנית AND הקורס עדיין פעיל
-        query += f" AND ua.is_submitted = TRUE AND ua.is_archived = FALSE AND (c.end_date IS NULL OR c.end_date >= {now_ts})"
+        query += f" AND ua.is_submitted = TRUE AND ua.is_archived = FALSE AND {course_active_cond}"
     else:
-        # מופיע בלביצוע אם: לא הוגש AND לא הועבר לארכיון ידנית AND הקורס עדיין פעיל
-        query += f" AND ua.is_submitted = FALSE AND ua.is_archived = FALSE AND (c.end_date IS NULL OR c.end_date >= {now_ts})"
+        query += f" AND ua.is_submitted = FALSE AND ua.is_archived = FALSE AND {course_active_cond}"
         
     query += " ORDER BY a.due_date ASC;"
 
@@ -283,13 +284,19 @@ def update_user_language(user_id: int, language: str):
             
 def sync_user_courses(user_id, courses_list):
     """
-    מבנכרן את רשימת הקורסים: 
-    1. מעדכן נתונים גלובליים בטבלת courses.
+    מסנכרן את רשימת הקורסים: 
+    1. מעדכן נתונים גלובליים בטבלת courses (ממיר 0 ל-NULL).
     2. מקשר את המשתמש לקורסים בטבלת user_courses.
     """
     with get_conn() as conn:
         with conn.cursor() as cur:
             for course in courses_list:
+                # המרת 0 ל-None כדי שישמר כ-NULL ב-DB
+                start_date = course.get('startdate')
+                start_date = start_date if start_date else None
+                end_date = course.get('enddate')
+                end_date = end_date if end_date else None
+
                 # א. עדכון/הכנסה לטבלת קורסים הכללית
                 cur.execute("""
                     INSERT INTO courses (id, fullname, start_date, end_date)
@@ -301,8 +308,8 @@ def sync_user_courses(user_id, courses_list):
                 """, (
                     course['id'], 
                     course['fullname'], 
-                    course['startdate'], 
-                    course['enddate']
+                    start_date, 
+                    end_date
                 ))
 
                 # ב. קישור המשתמש לקורס (אם לא קיים כבר)
@@ -313,21 +320,27 @@ def sync_user_courses(user_id, courses_list):
                 """, (user_id, course['id']))
 
 def get_active_course_representatives():
-    query = """
+    now_ts = "EXTRACT(EPOCH FROM NOW())"
+    query = f"""
     SELECT DISTINCT ON (c.id) 
            c.id as course_id, c.fullname as course_name,
            u.id as user_id, u.moodle_token, u.institution
     FROM courses c
     JOIN user_courses uc ON c.id = uc.course_id
     JOIN users u ON uc.user_id = u.id
-    WHERE c.start_date <= EXTRACT(EPOCH FROM NOW()) 
-      AND c.end_date >= EXTRACT(EPOCH FROM NOW())
+    WHERE COALESCE(c.start_date, 0) <= {now_ts}
+      AND (
+          (c.end_date > 0 AND c.end_date >= {now_ts})
+          OR
+          (COALESCE(c.end_date, 0) = 0 AND (COALESCE(c.start_date, 0) + 15552000) >= {now_ts})
+      )
       AND u.moodle_token IS NOT NULL;
     """
     with get_conn() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(query)
             return cur.fetchall()
+        
 def get_tokens_for_course(course_id):
     query = """
     SELECT d.fcm_token, u.language
@@ -401,17 +414,23 @@ def link_assignment_to_course_users(assign_id: int, course_id: int):
             cur.execute(query, (assign_id, course_id))
             
 def get_all_assignments(user_id: int) -> list[dict]:
-    query = """
+    now_ts = "EXTRACT(EPOCH FROM NOW())"
+    expired_logic = f"((c.end_date > 0 AND c.end_date < {now_ts}) OR (COALESCE(c.end_date, 0) = 0 AND (COALESCE(c.start_date, 0) + 15552000) < {now_ts}))"
+    
+    query = f"""
     SELECT
         ua.id, a.title, a.course, a.open_date, a.due_date, a.link,
         ua.is_submitted, ua.is_archived, ua.is_submitted_late, ua.note,
-        -- בדיקה האם הקורס הסתיים (לפי שעון UTC)
-        (c.end_date IS NOT NULL AND c.end_date < EXTRACT(EPOCH FROM NOW())) as is_course_expired,
+        
+        -- בדיקה האם הקורס הסתיים (לפי תאריך או חצי שנה מתחילתו)
+        (c.id IS NOT NULL AND {expired_logic}) as is_course_expired,
+        
         CASE
-            WHEN ua.is_archived = TRUE OR (c.end_date IS NOT NULL AND c.end_date < EXTRACT(EPOCH FROM NOW())) THEN 'archive'
+            WHEN ua.is_archived = TRUE OR (c.id IS NOT NULL AND {expired_logic}) THEN 'archive'
             WHEN ua.is_submitted = TRUE THEN 'completed'
             ELSE 'pending'
         END as computed_status
+        
     FROM user_assignments ua
     JOIN assignments a ON ua.assignment_id = a.id
     LEFT JOIN courses c ON a.course = c.fullname
