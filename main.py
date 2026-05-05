@@ -50,14 +50,20 @@ load_dotenv()
 app = FastAPI(title="Moodle Ruppin Tasks API")
 
 scheduler = BackgroundScheduler()
+origins = [
+    "http://localhost",
+    "http://localhost:8000", # כדי שה-Swagger UI (Docs) של FastAPI יעבוד לך במחשב
+    "http://localhost:8081", # הכתובת הדיפולטית של ה-Metro ב-Expo
+]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins, 
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"], 
+    allow_headers=["*"], 
 )
+
 
 
 
