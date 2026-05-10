@@ -8,6 +8,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime
 from exponent_server_sdk import PushClient, PushMessage
 from fastapi import BackgroundTasks, Header
+import os
 
 from database import (
     save_user_to_db,
