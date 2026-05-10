@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime
 from exponent_server_sdk import PushClient, PushMessage
+from fastapi import BackgroundTasks, Header
 
 from database import (
     save_user_to_db,
@@ -289,19 +290,6 @@ def get_moodle_urls(institution: str):
         "base": base
     }
     
-@app.get("/api/test-notification")
-def trigger_test_notification():
-    # שים כאן את הטוקן שלך ישירות כדי לוודא שזה עובד
-    my_token = "ExponentPushToken[O_PZroF2XB8khcoM0SW81J]"
-    
-    result = send_push_notification(
-        expo_token=my_token,
-        title="MyTask",
-        body="יא באללה וכמה לה לה וכל היום זה רק ללה"
-    )
-    
-    return {"message": "Notification triggered", "expo_result": result}
-
 
 @app.post("/api/refresh")
 def refresh(req: RefreshRequest):
@@ -450,6 +438,22 @@ def sync_assignments(authorization: Optional[str] = Header(None)):
 
 
 # ── Notifications ──────────────────────────────────────────────────────────────
+INTERNAL_SECRET = os.getenv("INTERNAL_TASK_SECRET")
+
+@app.post("/api/admin/trigger-discovery")
+async def trigger_discovery_externally(
+    background_tasks: BackgroundTasks, 
+    x_task_secret: str = Header(None)
+):
+    # בדיקת אבטחה: רק מי שיודע את הקוד הסודי יכול להפעיל את הסריקה
+    if x_task_secret != INTERNAL_SECRET:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    
+    # שימוש ב-BackgroundTasks מאפשר להחזיר תשובה מהירה ל-Azure 
+    # בזמן שהסריקה הכבדה ממשיכה לרוץ ברקע של השרת
+    background_tasks.add_task(discovery_task)
+    
+    return {"status": "Discovery triggered in background"}
 
 @app.get("/api/notifications/settings")
 def get_settings(authorization: Optional[str] = Header(None)):
@@ -574,10 +578,7 @@ def run_discovery_if_needed():
         
         
 @app.on_event("startup")
-def start_scheduler():
-    # 1. משימת סריקת המודל (רצה כל 30 דקות, אבל בודקת את חוקי השעות שלך)
-    scheduler.add_job(id='moodle_discovery', func=run_discovery_if_needed, trigger='interval', minutes=30)
-    
+def start_scheduler():  
     # 2. משימת התזכורות (רצה כל 10 דקות 24/7 כדי לדייק בזמני ההתראה)
     scheduler.add_job(id='reminders_check', func=reminder_task, trigger='interval', minutes=10)
     
