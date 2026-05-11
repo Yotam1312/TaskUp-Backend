@@ -569,6 +569,19 @@ def reminder_task():
     except Exception as e:
         print(f"שגיאה בסריקת תזכורות: {e}")
 
+def full_sync_all_users_courses_task():
+    print(f"--- [סנכרון קורסים גלובלי] {datetime.now().strftime('%H:%M:%S')} ---")
+    users = get_all_users() # שולף את כל המשתמשים כולל טוקן מפעונח
+    for user in users:
+        try:
+            # קביעת הכתובות לפי המוסד (צריך לשלוף את המוסד מה-DB ב-get_all_users אם חסר)
+            db_user = get_user_by_id(user['id'])
+            urls = get_moodle_urls(db_user.get("institution", "ruppin"))
+            
+            courses = get_user_courses(user["moodle_token"], user["moodle_user_id"], urls["api"])
+            sync_user_courses(user['id'], courses)
+        except Exception as e:
+            print(f"Failed to sync courses for user {user['id']}: {e}")
         
         
 @app.on_event("startup")
@@ -595,6 +608,8 @@ def start_scheduler():
     # ראשון: 02:00 (ב-08:00 כבר נכנס לפעולה הלו"ז הרגיל של יום ראשון)
     scheduler.add_job(id='discovery_sun_early', func=discovery_task, trigger='cron', day_of_week='sun', hour='2', minute='0')
 
+    # 6. סנכרון קורסים נדיר (פעם ביום ב-4 לפנות בוקר)
+    scheduler.add_job(id='full_course_sync', func=full_sync_all_users_courses_task, trigger='cron', hour='4', minute='0')
     scheduler.start()
     print("ה-Scheduler הופעל בהצלחה עם לו״ז חכם ויעיל!")
 # --- שאר ה-Endpoints שלך (Login, Sync וכו') ---
@@ -623,11 +638,15 @@ def manual_discovery():
     discovery_task()
     return {"status": "Discovery task triggered successfully", "time": datetime.now().strftime('%H:%M:%S')}
 
-
 def notify_course_users(course_id: int, course_name: str, short_title: str, is_new: bool):
-    """מושכת טוקנים ושולחת התראות חכמות לפי השפה הספציפית של כל משתמש"""
     tokens_data = get_tokens_for_course(course_id)
     for user_device in tokens_data:
+        # בדיקה האם המשתמש אישר את סוג ההתראה הספציפי הזה
+        should_notify = user_device['notify_on_new_assignment'] if is_new else user_device['notify_on_due_date_change']
+        
+        if not should_notify:
+            continue
+
         lang = user_device.get('language', 'he')
         if is_new:
             title = "מטלה חדשה"
@@ -635,6 +654,7 @@ def notify_course_users(course_id: int, course_name: str, short_title: str, is_n
         else:
             title = "שינוי במועד ההגשה"
             msg = f'עודכן תאריך הגשה עבור "{short_title}" בקורס "{course_name}"'
+        
         send_push_notification(user_device['fcm_token'], title, msg)
 
 

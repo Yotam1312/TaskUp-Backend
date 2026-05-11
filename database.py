@@ -343,14 +343,14 @@ def get_active_course_representatives():
         
 def get_tokens_for_course(course_id):
     query = """
-    SELECT d.fcm_token, u.language
+    SELECT d.fcm_token, u.language, 
+           ns.notify_on_new_assignment, ns.notify_on_due_date_change
     FROM user_devices d
     JOIN user_courses uc ON d.user_id = uc.user_id
     JOIN notification_settings ns ON d.user_id = ns.user_id
     JOIN users u ON d.user_id = u.id
     WHERE uc.course_id = %s 
-      AND d.fcm_token IS NOT NULL
-      AND ns.notify_on_new_assignment = True;
+      AND d.fcm_token IS NOT NULL;
     """
     with get_conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
