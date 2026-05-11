@@ -569,39 +569,34 @@ def reminder_task():
     except Exception as e:
         print(f"שגיאה בסריקת תזכורות: {e}")
 
-def should_run_discovery():
-    now = datetime.now()
-    h, m, wd = now.hour, now.minute, now.weekday()
-    is_weekend = wd in [4, 5] # 4=שישי, 5=שבת (בישראל)
-    
-    # ימי חול (א-ה)
-    if not is_weekend:
-        if 8 <= h < 20: return True
-        if (20 <= h <= 23 or h == 0) and m < 30: return True # בשעות האלו ירוץ רק באזור XX:00
-        return False
-        
-    # סוף שבוע (ו-ש)
-    else:
-        if 8 <= h < 20: return True
-        return False
-
-def run_discovery_if_needed():
-    if should_run_discovery():
-        discovery_task()
-    else:
-        print(f"--- [סריקת מודל] {datetime.now().strftime('%H:%M:%S')} מחוץ לשעות הפעילות, מדלג ---")
         
         
 @app.on_event("startup")
 def start_scheduler():  
-    # 1. משימת התזכורות למטלות שמתקרבות (כל 10 דקות)
+    # 1. משימת התזכורות (רצה כל 10 דקות 24/7 כדי לבדוק אם מתקרב דדליין לאנשים)
     scheduler.add_job(id='reminders_check', func=reminder_task, trigger='interval', minutes=10)
     
-    # 2. משימת סריקה לגילוי מטלות חדשות ועדכוני תאריכים (כל 30 דקות)
-    scheduler.add_job(id='discovery_check', func=run_discovery_if_needed, trigger='interval', minutes=30)
+    # === סריקות למטלות חדשות (מנוע ה-Discovery) ===
     
+    # 2. ימים א'-ה': שעות העומס (08:00 עד 17:59) -> כל 10 דקות
+    scheduler.add_job(id='discovery_week_day', func=discovery_task, trigger='cron', day_of_week='sun-thu', hour='8-17', minute='*/10')
+    
+    # 3. ימים א'-ה': שעות הערב (18:00 עד 23:59) -> כל 30 דקות (בלילה השרת נח עד 8 בבוקר)
+    scheduler.add_job(id='discovery_week_night', func=discovery_task, trigger='cron', day_of_week='sun-thu', hour='18-23', minute='*/30')
+    
+    # 4. יום שישי בבוקר (06:00 עד 14:59) -> כל 30 דקות
+    scheduler.add_job(id='discovery_fri_morning', func=discovery_task, trigger='cron', day_of_week='fri', hour='6-14', minute='*/30')
+    
+    # 5. סופ"ש רגוע: משישי 15:00 עד ראשון בבוקר -> כל 5 שעות בדיוק
+    # שישי: 15:00, 20:00
+    scheduler.add_job(id='discovery_fri_afternoon', func=discovery_task, trigger='cron', day_of_week='fri', hour='15,20', minute='0')
+    # שבת: 01:00, 06:00, 11:00, 16:00, 21:00
+    scheduler.add_job(id='discovery_sat', func=discovery_task, trigger='cron', day_of_week='sat', hour='1,6,11,16,21', minute='0')
+    # ראשון: 02:00 (ב-08:00 כבר נכנס לפעולה הלו"ז הרגיל של יום ראשון)
+    scheduler.add_job(id='discovery_sun_early', func=discovery_task, trigger='cron', day_of_week='sun', hour='2', minute='0')
+
     scheduler.start()
-    print("ה-Scheduler הופעל בהצלחה עם 2 המשימות!")
+    print("ה-Scheduler הופעל בהצלחה עם לו״ז חכם ויעיל!")
 # --- שאר ה-Endpoints שלך (Login, Sync וכו') ---
 @app.get("/")
 def home():
