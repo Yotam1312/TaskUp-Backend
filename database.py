@@ -231,7 +231,7 @@ def revoke_refresh_token(token: str):
 def get_notification_settings(user_id: int) -> dict | None:
     query = """
     SELECT hours_before, notify_on_new_assignment, notify_on_due_date_change
-    FROM cation_settings
+    FROM notification_settings
     WHERE user_id = %s
     """
     with get_conn() as conn:
