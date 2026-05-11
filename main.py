@@ -586,32 +586,30 @@ def full_sync_all_users_courses_task():
         
 @app.on_event("startup")
 def start_scheduler():  
-    # 1. משימת התזכורות (רצה כל 10 דקות 24/7 כדי לבדוק אם מתקרב דדליין לאנשים)
+    # 1. משימת התזכורות (כל 10 דקות 24/7)
     scheduler.add_job(id='reminders_check', func=reminder_task, trigger='interval', minutes=10)
     
-    # === סריקות למטלות חדשות (מנוע ה-Discovery) ===
+    # === סריקות למטלות חדשות (מנוע ה-Discovery) - תיקון טווח הימים ===
     
     # 2. ימים א'-ה': שעות העומס (08:00 עד 17:59) -> כל 10 דקות
-    scheduler.add_job(id='discovery_week_day', func=discovery_task, trigger='cron', day_of_week='sun-thu', hour='8-17', minute='*/10')
+    scheduler.add_job(id='discovery_week_day', func=discovery_task, trigger='cron', day_of_week='mon-thu,sun', hour='8-17', minute='*/10')
     
-    # 3. ימים א'-ה': שעות הערב (18:00 עד 23:59) -> כל 30 דקות (בלילה השרת נח עד 8 בבוקר)
-    scheduler.add_job(id='discovery_week_night', func=discovery_task, trigger='cron', day_of_week='sun-thu', hour='18-23', minute='*/30')
+    # 3. ימים א'-ה': שעות הערב (18:00 עד 23:59) -> כל 30 דקות
+    scheduler.add_job(id='discovery_week_night', func=discovery_task, trigger='cron', day_of_week='mon-thu,sun', hour='18-23', minute='*/30')
     
     # 4. יום שישי בבוקר (06:00 עד 14:59) -> כל 30 דקות
     scheduler.add_job(id='discovery_fri_morning', func=discovery_task, trigger='cron', day_of_week='fri', hour='6-14', minute='*/30')
     
-    # 5. סופ"ש רגוע: משישי 15:00 עד ראשון בבוקר -> כל 5 שעות בדיוק
-    # שישי: 15:00, 20:00
+    # 5. סופ"ש: משישי 15:00 עד ראשון 02:00 -> כל 5 שעות
     scheduler.add_job(id='discovery_fri_afternoon', func=discovery_task, trigger='cron', day_of_week='fri', hour='15,20', minute='0')
-    # שבת: 01:00, 06:00, 11:00, 16:00, 21:00
     scheduler.add_job(id='discovery_sat', func=discovery_task, trigger='cron', day_of_week='sat', hour='1,6,11,16,21', minute='0')
-    # ראשון: 02:00 (ב-08:00 כבר נכנס לפעולה הלו"ז הרגיל של יום ראשון)
     scheduler.add_job(id='discovery_sun_early', func=discovery_task, trigger='cron', day_of_week='sun', hour='2', minute='0')
 
-    # 6. סנכרון קורסים נדיר (פעם ביום ב-4 לפנות בוקר)
+    # 6. סנכרון קורסים גלובלי (פעם ביום ב-4 לפנות בוקר)
     scheduler.add_job(id='full_course_sync', func=full_sync_all_users_courses_task, trigger='cron', hour='4', minute='0')
+
     scheduler.start()
-    print("ה-Scheduler הופעל בהצלחה עם לו״ז חכם ויעיל!")
+    print("ה-Scheduler הופעל בהצלחה!")
 # --- שאר ה-Endpoints שלך (Login, Sync וכו') ---
 @app.get("/")
 def home():
