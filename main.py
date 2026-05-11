@@ -594,12 +594,14 @@ def run_discovery_if_needed():
         
 @app.on_event("startup")
 def start_scheduler():  
-    # 2. משימת התזכורות (רצה כל 10 דקות 24/7 כדי לדייק בזמני ההתראה)
+    # 1. משימת התזכורות למטלות שמתקרבות (כל 10 דקות)
     scheduler.add_job(id='reminders_check', func=reminder_task, trigger='interval', minutes=10)
+    
+    # 2. משימת סריקה לגילוי מטלות חדשות ועדכוני תאריכים (כל 30 דקות)
+    scheduler.add_job(id='discovery_check', func=run_discovery_if_needed, trigger='interval', minutes=30)
     
     scheduler.start()
     print("ה-Scheduler הופעל בהצלחה עם 2 המשימות!")
-    
 # --- שאר ה-Endpoints שלך (Login, Sync וכו') ---
 @app.get("/")
 def home():
