@@ -389,7 +389,7 @@ def get_all(authorization: Optional[str] = Header(None)):
 @app.get("/api/test-notification")
 def trigger_test_notification():
     # שים כאן את הטוקן שלך ישירות כדי לוודא שזה עובד
-    my_token = "ExponentPushToken[O_PZroF2XB8khcoM0SW81J]"
+    my_token = "ExponentPushToken[fVjdt1FMfGugsR3Y6NFiYU]"
 
     result = send_push_notification(
         expo_token=my_token,
