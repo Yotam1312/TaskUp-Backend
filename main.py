@@ -386,6 +386,20 @@ def get_all(authorization: Optional[str] = Header(None)):
     user_id = get_current_user_id(authorization)
     return get_all_assignments(user_id)
 
+@app.get("/api/test-notification")
+def trigger_test_notification():
+    # שים כאן את הטוקן שלך ישירות כדי לוודא שזה עובד
+    my_token = "ExponentPushToken[O_PZroF2XB8khcoM0SW81J]"
+
+    result = send_push_notification(
+        expo_token=my_token,
+        title="MyTask",
+        body="יא באללה וכמה לה לה וכל היום זה רק ללה"
+    )
+
+    return {"message": "Notification triggered", "expo_result": result}
+
+
 # ── Sync ──────────────────────────────────────────────────────────────────────
 
 @app.post("/api/assignments/sync")
