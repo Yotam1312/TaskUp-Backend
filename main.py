@@ -678,6 +678,8 @@ def run_discovery_engine(course_id: int, course_name: str, token_plain: str, ins
     for quiz in moodle_quizzes:
         all_items.append({"id": quiz["id"], "name": quiz["name"], "due_date_ts": quiz.get("timeclose"), "raw_data": quiz, "type": "quiz"})
 
+    now_ts = datetime.utcnow().timestamp()
+
     for item in all_items:
         moodle_id = item["id"]
         new_due_date_ts = item["due_date_ts"]
@@ -694,11 +696,19 @@ def run_discovery_engine(course_id: int, course_name: str, token_plain: str, ins
             print(f"! גילוי מנוע חכם: {item['name']} בקורס {course_name}")
             db_id = save_new_assignment_globally(course_id, course_name, item["raw_data"], urls['base'], item_type=item_type)
             link_assignment_to_course_users(db_id, course_id)
-            notify_course_users(course_id, course_name, short_title, is_new=True)
             
+            # --- התיקון נגד ספאם: התראה רק אם אין תאריך, או שהתאריך בעתיד ---
+            if not new_due_date_ts or new_due_date_ts > now_ts:
+                notify_course_users(course_id, course_name, short_title, is_new=True)
+            else:
+                print(f"-> המטלה ישנה, שומר ב-DB ומדלג על פוש.")
+                
         elif existing_item.get("due_date") != new_due_date_dt:
             print(f"!!! שינוי תאריך חכם: {item['name']} בקורס {course_name}")
             update_assignment_due_date(moodle_id, new_due_date_ts, item_type=item_type)
-            notify_course_users(course_id, course_name, short_title, is_new=False)
+            
+            # גם בשינוי תאריך נוודא שלא מדובר במטלה שכבר פג תוקפה
+            if not new_due_date_ts or new_due_date_ts > now_ts:
+                notify_course_users(course_id, course_name, short_title, is_new=False)
             
     return all_items # מחזיר לטובת ה-Sync האישי
